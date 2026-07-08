@@ -6,6 +6,8 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+ENV MCP_HOOKER_ROOT=/app
+
 COPY pyproject.toml README.md config.yaml /app/
 RUN pip install --no-cache-dir --upgrade pip \
     && python -c "import subprocess, tomllib; \

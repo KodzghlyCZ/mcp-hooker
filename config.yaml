@@ -2,10 +2,13 @@ server:
   name: petstore-mcp
   host: 0.0.0.0
   port: 8000
+  # FastMCP rejects non-loopback Host headers when true (421). Keep false for Docker/LAN.
+  host_origin_protection: false
+  allowed_hosts: []
 
 openapi:
   # Remote URL or local path (relative to project root or absolute).
-  spec: https://petstore3.swagger.io/api/v3/openapi.json
+  spec: https://app.caflou.com/api/v1/i/docs/openapi/v1/openapi.yaml
   fetch_timeout: 30.0
 
 api:

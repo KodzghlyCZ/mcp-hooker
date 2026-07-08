@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
-from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
@@ -36,6 +36,7 @@ class ServerState:
     base_url: str = ""
     reload_lock: asyncio.Lock | None = None
     reload_task: asyncio.Task[None] | None = None
+    mcp_lifespan: AbstractAsyncContextManager[None] | None = field(default=None, repr=False)
 
 
 state = ServerState()
@@ -47,6 +48,32 @@ def _server_name() -> str:
 
 def _api_timeout() -> float:
     return float(cfg_get("api.timeout", default=30.0))
+
+
+def _http_app_options() -> dict[str, Any]:
+    allowed_hosts = cfg_get("server.allowed_hosts", default=[])
+    if not isinstance(allowed_hosts, list):
+        allowed_hosts = []
+    return {
+        "host_origin_protection": cfg_bool("server.host_origin_protection", default=False),
+        "allowed_hosts": [str(host) for host in allowed_hosts],
+    }
+
+
+async def _stop_mcp_lifespan() -> None:
+    if state.mcp_lifespan is None:
+        return
+    await state.mcp_lifespan.__aexit__(None, None, None)
+    state.mcp_lifespan = None
+
+
+async def _start_mcp_lifespan() -> None:
+    if state.mcp_app is None:
+        raise RuntimeError("MCP HTTP app is not initialized")
+    if state.mcp_lifespan is not None:
+        await _stop_mcp_lifespan()
+    state.mcp_lifespan = state.mcp_app.router.lifespan_context(state.mcp_app)
+    await state.mcp_lifespan.__aenter__()
 
 
 async def create_mcp_server() -> tuple[FastMCP, httpx.AsyncClient, dict[str, Any]]:
@@ -66,12 +93,15 @@ async def create_mcp_server() -> tuple[FastMCP, httpx.AsyncClient, dict[str, Any
     return mcp, client, {"spec": spec, "base_url": base_url}
 
 
-async def reload_server(*, reason: str = "manual") -> dict[str, Any]:
+async def reload_server(*, reason: str = "manual", manage_lifespan: bool = True) -> dict[str, Any]:
     if state.reload_lock is None:
         state.reload_lock = asyncio.Lock()
 
     async with state.reload_lock:
         reload_settings()
+
+        if manage_lifespan:
+            await _stop_mcp_lifespan()
 
         if state.client is not None:
             await state.client.aclose()
@@ -80,9 +110,12 @@ async def reload_server(*, reason: str = "manual") -> dict[str, Any]:
         mcp, client, meta = await create_mcp_server()
         state.mcp = mcp
         state.client = client
-        state.mcp_app = mcp.http_app()
+        state.mcp_app = mcp.http_app(**_http_app_options())
         state.spec_source = resolve_spec_location()
         state.base_url = meta["base_url"]
+
+        if manage_lifespan:
+            await _start_mcp_lifespan()
 
         info = await mcp.list_tools()
         tool_count = len(info)
@@ -186,17 +219,20 @@ async def lifespan(_app: Starlette):
     state.reload_task = asyncio.create_task(_reload_loop(stop_event))
     _register_sighup()
 
-    yield
-
-    stop_event.set()
-    if state.reload_task is not None:
-        state.reload_task.cancel()
-        try:
-            await state.reload_task
-        except asyncio.CancelledError:
-            pass
-    if state.client is not None:
-        await state.client.aclose()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        if state.reload_task is not None:
+            state.reload_task.cancel()
+            try:
+                await state.reload_task
+            except asyncio.CancelledError:
+                pass
+        await _stop_mcp_lifespan()
+        if state.client is not None:
+            await state.client.aclose()
+            state.client = None
 
 
 app = Starlette(

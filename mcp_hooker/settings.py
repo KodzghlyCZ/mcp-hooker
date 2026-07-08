@@ -5,15 +5,25 @@ from pathlib import Path
 
 from yayaya import contains, get, init, reload_config
 
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_PACKAGE_DIR = Path(__file__).resolve().parent
 _LOADED = False
 
 
 def project_root() -> Path:
-    return _PROJECT_ROOT
+    """Directory used to resolve relative config and local OpenAPI paths."""
+    explicit = os.environ.get("MCP_HOOKER_ROOT", "").strip()
+    if explicit:
+        return Path(explicit)
+
+    source_root = _PACKAGE_DIR.parent
+    if (source_root / "pyproject.toml").is_file():
+        return source_root
+
+    return Path.cwd()
 
 
 def _resolve_paths() -> list[str]:
+    root = project_root()
     explicit = os.environ.get("MCP_HOOKER_CONFIG_FILES", "").strip()
     if explicit:
         paths: list[Path] = []
@@ -22,11 +32,11 @@ def _resolve_paths() -> list[str]:
             if not entry:
                 continue
             path = Path(entry)
-            paths.append(path if path.is_absolute() else _PROJECT_ROOT / path)
+            paths.append(path if path.is_absolute() else root / path)
         return [str(p) for p in paths]
 
-    paths = [_PROJECT_ROOT / "config.yaml"]
-    local_overlay = _PROJECT_ROOT / "config.local.yaml"
+    paths = [root / "config.yaml"]
+    local_overlay = root / "config.local.yaml"
     if local_overlay.is_file():
         paths.append(local_overlay)
     return [str(p) for p in paths]

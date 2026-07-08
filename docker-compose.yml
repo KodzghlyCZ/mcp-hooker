@@ -4,6 +4,7 @@ services:
     ports:
       - "${MCP_HOOKER_PORT:-8000}:8000"
     environment:
+      MCP_HOOKER_ROOT: /app
       MCP_HOOKER_CONFIG_FILES: config.yaml
     volumes:
       - ./config.yaml:/app/config.yaml:ro
