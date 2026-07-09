@@ -9,6 +9,7 @@ import httpx
 import yaml
 
 from mcp_hooker.settings import cfg_get, project_root
+from mcp_hooker.schema_sanitizer import sanitize_openapi_spec
 
 
 def _looks_like_url(value: str) -> bool:
@@ -71,11 +72,16 @@ async def load_openapi_spec() -> dict[str, Any]:
     location = resolve_spec_location()
     headers = {}
     timeout = float(cfg_get("openapi.fetch_timeout", default=30.0))
+    sanitizer = cfg_get("openapi.sanitizer", default={}) or {}
+    if not isinstance(sanitizer, dict):
+        sanitizer = {}
 
     if _looks_like_url(location):
-        return await _fetch_remote_spec(location, headers=headers, timeout=timeout)
+        spec = await _fetch_remote_spec(location, headers=headers, timeout=timeout)
+        return sanitize_openapi_spec(spec, sanitizer)
 
     path = Path(location)
     if not path.is_absolute():
         path = project_root() / path
-    return _read_local_spec(path)
+    spec = _read_local_spec(path)
+    return sanitize_openapi_spec(spec, sanitizer)

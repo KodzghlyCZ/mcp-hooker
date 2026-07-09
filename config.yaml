@@ -1,5 +1,5 @@
 server:
-  name: petstore-mcp
+  name: caflou-mcp
   host: 0.0.0.0
   port: 8000
   # FastMCP rejects non-loopback Host headers when true (421). Keep false for Docker/LAN.
@@ -10,15 +10,24 @@ openapi:
   # Remote URL or local path (relative to project root or absolute).
   spec: https://app.caflou.com/api/v1/i/docs/openapi/v1/openapi.yaml
   fetch_timeout: 30.0
+  sanitizer:
+    # Preprocess response schemas before FastMCP ingests the OpenAPI spec.
+    enabled: false
+    # `preserve` keeps unresolved local refs and logs a warning.
+    # `replace_generic` swaps the problematic response schema for a generic object.
+    on_unresolved: preserve
 
 api:
   # Target API base URL. When omitted, servers[0].url from the spec is used.
-  base_url: https://petstore3.swagger.io/api/v3
+  # HOST ONLY — do NOT append /api/v1. Caflou spec paths already start with
+  # /api/v1/{account_id}/..., so a base_url of .../api/v1 doubles the prefix
+  # (https://app.caflou.com/api/v1/api/v1/...) and every tool call 404s.
+  base_url: https://app.caflou.com
   timeout: 30.0
-  headers: {}
-  # Example bearer token via environment expansion:
-  # headers:
-  #   Authorization: "Bearer ${API_TOKEN}"
+  # Injected on every upstream request. ${CAFLOU_API_TOKEN} is expanded from the
+  # environment by yayaya; never commit the raw token. See docs/RUNBOOK.md §4.
+  headers:
+    Authorization: "Bearer ${CAFLOU_API_TOKEN}"
 
 reload:
   # POST /admin/reload to refresh config + spec. Set token to require Authorization: Bearer <token>.

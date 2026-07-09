@@ -52,6 +52,8 @@ export MCP_HOOKER_CONFIG_FILES=config.yaml,config.docker.yaml
 | `server.port` | Bind port |
 | `openapi.spec` | Remote URL or local path to OpenAPI JSON/YAML |
 | `openapi.fetch_timeout` | Timeout when downloading remote specs (seconds) |
+| `openapi.sanitizer.enabled` | Inline local response-schema refs before FastMCP conversion |
+| `openapi.sanitizer.on_unresolved` | `preserve` or `replace_generic` when local refs still cannot be resolved |
 | `api.base_url` | Upstream API base URL (falls back to `servers[0].url` in the spec) |
 | `api.timeout` | httpx timeout for tool calls |
 | `api.headers` | Extra request headers; values support `${ENV_VAR}` |
@@ -59,13 +61,34 @@ export MCP_HOOKER_CONFIG_FILES=config.yaml,config.docker.yaml
 | `reload.interval_seconds` | Auto-reload interval (`0` = off) |
 | `reload.on_sighup` | Reload on `SIGHUP` (default `true`) |
 
-Example `api.headers` with a secret from the environment:
+Example `api.headers` with a secret from the environment (this is how the
+Caflou instance authorizes upstream requests):
 
 ```yaml
 api:
+  base_url: https://app.caflou.com
   headers:
-    Authorization: "Bearer ${API_TOKEN}"
+    Authorization: "Bearer ${CAFLOU_API_TOKEN}"
 ```
+
+Example sanitizer settings for problematic OpenAPI response schemas:
+
+```yaml
+openapi:
+  sanitizer:
+    enabled: true
+    on_unresolved: replace_generic
+```
+
+The sanitizer only touches response schemas. It inlines local
+`#/components/schemas/...` refs before handing the spec to FastMCP. If recursive
+or otherwise unresolved local refs remain, `replace_generic` swaps the affected
+response schema for a generic object so MCP clients can still load the tool.
+
+Set the value via the environment (never commit it). With Docker Compose, copy
+`.env.example` to `.env` and fill in `CAFLOU_API_TOKEN`; the token is passed
+into the container and injected on every upstream call. See `docs/RUNBOOK.md`
+§4 (auth) and §6 (production deployment).
 
 ## HTTP endpoints
 

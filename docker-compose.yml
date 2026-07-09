@@ -6,5 +6,8 @@ services:
     environment:
       MCP_HOOKER_ROOT: /app
       MCP_HOOKER_CONFIG_FILES: config.yaml
+      # Upstream API token, injected into api.headers via yayaya ${ENV} expansion.
+      # Value comes from the host environment or a .env file (gitignored).
+      CAFLOU_API_TOKEN: ${CAFLOU_API_TOKEN:-}
     volumes:
       - ./config.yaml:/app/config.yaml:ro

@@ -76,9 +76,43 @@ async def _start_mcp_lifespan() -> None:
     await state.mcp_lifespan.__aenter__()
 
 
+def _warn_on_duplicate_base_path(base_url: str, spec: dict[str, Any]) -> None:
+    """Warn when api.base_url repeats a path prefix already in every spec path.
+
+    OpenAPI operation paths are joined onto the httpx client base_url. If the
+    base_url already carries a path segment (e.g. ``/api/v1``) that every
+    operation path also starts with, requests get a doubled prefix
+    (``/api/v1/api/v1/...``) and 404. base_url should usually be host-only.
+    """
+    from urllib.parse import urlparse
+
+    base_path = urlparse(base_url).path.strip("/")
+    if not base_path:
+        return
+
+    paths = spec.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        return
+
+    prefix = f"/{base_path}/"
+    if all(isinstance(p, str) and p.startswith(prefix) for p in paths):
+        logger.warning(
+            "api.base_url %r ends with '/%s', which every OpenAPI path already "
+            "includes; upstream requests will double it (e.g. /%s/%s/...) and 404. "
+            "Set api.base_url to the host only (e.g. %s://%s).",
+            base_url,
+            base_path,
+            base_path,
+            base_path,
+            urlparse(base_url).scheme,
+            urlparse(base_url).netloc,
+        )
+
+
 async def create_mcp_server() -> tuple[FastMCP, httpx.AsyncClient, dict[str, Any]]:
     spec = await load_openapi_spec()
     base_url = resolve_base_url(spec)
+    _warn_on_duplicate_base_path(base_url, spec)
     client = httpx.AsyncClient(
         base_url=base_url,
         headers=cfg_headers(),
