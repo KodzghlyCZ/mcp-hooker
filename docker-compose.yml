@@ -11,3 +11,6 @@ services:
       CAFLOU_API_TOKEN: ${CAFLOU_API_TOKEN:-}
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      # Mount patch files referenced from openapi.patch_files (paths are relative
+      # to the config file directory, i.e. /app when config.yaml is mounted here).
+      # - ./patch.yaml:/app/patch.yaml:ro

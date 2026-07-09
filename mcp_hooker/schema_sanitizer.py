@@ -19,6 +19,9 @@ def sanitize_openapi_spec(spec: dict[str, Any], config: dict[str, Any] | None = 
     sanitized = copy.deepcopy(spec)
     components = _component_schemas(sanitized)
     unresolved_action = str(config.get("on_unresolved", "preserve")).strip().lower()
+    paginated_lists = config.get("paginated_lists", {}) or {}
+    paginated_lists_enabled = bool(paginated_lists.get("enabled", False))
+    paginated_items_key = str(paginated_lists.get("items_key", "results")).strip() or "results"
 
     for path, path_item in sanitized.get("paths", {}).items():
         if not isinstance(path_item, dict):
@@ -31,6 +34,8 @@ def sanitize_openapi_spec(spec: dict[str, Any], config: dict[str, Any] | None = 
                 components,
                 unresolved_action=unresolved_action,
                 op_name=f"{method.upper()} {path}",
+                paginated_lists_enabled=paginated_lists_enabled,
+                paginated_items_key=paginated_items_key,
             )
 
     return sanitized
@@ -50,6 +55,8 @@ def _sanitize_operation_responses(
     *,
     unresolved_action: str,
     op_name: str,
+    paginated_lists_enabled: bool = False,
+    paginated_items_key: str = "results",
 ) -> None:
     responses = operation.get("responses")
     if not isinstance(responses, dict):
@@ -93,7 +100,17 @@ def _sanitize_operation_responses(
                     ", ".join(unresolved_refs),
                 )
 
-            media["schema"] = _strip_markers(sanitized_schema)
+            final_schema = _strip_markers(sanitized_schema)
+            if paginated_lists_enabled and _operation_has_pagination_params(operation):
+                rewritten = _rewrite_paginated_list_schema(
+                    final_schema,
+                    items_key=paginated_items_key,
+                )
+                if rewritten is not None:
+                    logger.debug("Rewrote paginated list response schema for %s", op_name)
+                    final_schema = rewritten
+
+            media["schema"] = final_schema
 
 
 def _inline_local_refs(value: Any, components: dict[str, Any], *, stack: tuple[str, ...]) -> Any:
@@ -166,6 +183,58 @@ def _collect_unresolved_refs(value: Any) -> set[str]:
     for item in value.values():
         refs.update(_collect_unresolved_refs(item))
     return refs
+
+
+def _operation_has_pagination_params(operation: dict[str, Any]) -> bool:
+    names: set[str] = set()
+    for param in operation.get("parameters", []):
+        if not isinstance(param, dict):
+            continue
+        if param.get("in") != "query":
+            continue
+        name = param.get("name")
+        if isinstance(name, str):
+            names.add(name)
+    return "page" in names or "per" in names
+
+
+def _rewrite_paginated_list_schema(
+    schema: dict[str, Any],
+    *,
+    items_key: str = "results",
+) -> dict[str, Any] | None:
+    """Rewrite a bare array response schema into a paginated object envelope."""
+    if schema.get("type") != "array":
+        return None
+
+    items = schema.get("items", {})
+    if not isinstance(items, dict):
+        items = {}
+
+    return {
+        "type": "object",
+        "additionalProperties": True,
+        "properties": {
+            "page": {"type": "integer"},
+            "per": {"type": "integer"},
+            "prev_page": {"type": ["integer", "null"]},
+            "next_page": {"type": ["integer", "null"]},
+            "total_pages": {"type": "integer"},
+            "total_results": {"type": "integer"},
+            "total_writable_results": {"type": "integer"},
+            "total_virtuals": {"type": "integer"},
+            "counters": {"nullable": True},
+            items_key: {
+                "type": "array",
+                "items": copy.deepcopy(items),
+            },
+            "unread_object_ids": {
+                "type": "array",
+                "items": {"type": "integer"},
+            },
+        },
+        "required": ["page", items_key],
+    }
 
 
 def _strip_markers(value: Any) -> Any:

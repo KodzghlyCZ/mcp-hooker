@@ -15,10 +15,16 @@ openapi:
   patch_files: []
   sanitizer:
     # Preprocess response schemas before FastMCP ingests the OpenAPI spec.
-    enabled: false
+    enabled: true
     # `preserve` keeps unresolved local refs and logs a warning.
     # `replace_generic` swaps the problematic response schema for a generic object.
     on_unresolved: preserve
+    # Caflou list endpoints declare bare arrays but return paginated objects
+    # ({page, results, ...}). Rewrite those response schemas so FastMCP output
+    # validation matches the live API.
+    paginated_lists:
+      enabled: true
+      items_key: results
 
 api:
   # Target API base URL. When omitted, servers[0].url from the spec is used.

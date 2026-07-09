@@ -55,6 +55,8 @@ export MCP_HOOKER_CONFIG_FILES=config.yaml,config.docker.yaml
 | `openapi.patch_files` | Local YAML/JSON overlays deep-merged into the parsed OpenAPI spec, resolved relative to the primary config file |
 | `openapi.sanitizer.enabled` | Inline local response-schema refs before FastMCP conversion |
 | `openapi.sanitizer.on_unresolved` | `preserve` or `replace_generic` when local refs still cannot be resolved |
+| `openapi.sanitizer.paginated_lists.enabled` | Rewrite GET list endpoints (`page`/`per` params) from bare arrays to paginated object envelopes |
+| `openapi.sanitizer.paginated_lists.items_key` | Name of the array field in paginated responses (default `results`) |
 | `api.base_url` | Upstream API base URL (falls back to `servers[0].url` in the spec) |
 | `api.timeout` | httpx timeout for tool calls |
 | `api.headers` | Extra request headers; values support `${ENV_VAR}` |
@@ -79,12 +81,21 @@ openapi:
   sanitizer:
     enabled: true
     on_unresolved: replace_generic
+    paginated_lists:
+      enabled: true
+      items_key: results
 ```
 
 The sanitizer only touches response schemas. It inlines local
 `#/components/schemas/...` refs before handing the spec to FastMCP. If recursive
 or otherwise unresolved local refs remain, `replace_generic` swaps the affected
 response schema for a generic object so MCP clients can still load the tool.
+
+When `paginated_lists.enabled` is true, GET operations that accept `page` or
+`per` query parameters and declare a bare JSON array response are rewritten to
+an object envelope (`page`, `results`, optional totals, `additionalProperties:
+true`). This matches APIs such as Caflou that paginate list responses even when
+the upstream OpenAPI spec still documents a plain array.
 
 ### OpenAPI patch files
 
@@ -104,6 +115,16 @@ keeps the server spec-driven even when the upstream file is re-downloaded
 periodically. Relative patch paths are resolved against the directory of the
 primary config file (the first file in `MCP_HOOKER_CONFIG_FILES`, or
 `config.yaml` by default).
+
+In Docker, mount patch files into that same directory inside the container. If
+`config.yaml` is mounted at `/app/config.yaml`, then `patch.yaml` must also be
+available at `/app/patch.yaml`:
+
+```yaml
+volumes:
+  - ./config.yaml:/app/config.yaml:ro
+  - ./patch.yaml:/app/patch.yaml:ro
+```
 
 Example Caflou patch for the missing `GET /api/v1/accounts` endpoint:
 

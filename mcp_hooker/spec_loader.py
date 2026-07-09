@@ -33,9 +33,12 @@ def _parse_spec_bytes(payload: bytes, source: str) -> dict[str, Any]:
     return data
 
 
-def _read_local_spec(path: Path) -> dict[str, Any]:
+def _read_local_spec(path: Path, *, kind: str = "OpenAPI spec") -> dict[str, Any]:
     if not path.is_file():
-        raise FileNotFoundError(f"OpenAPI spec file not found: {path}")
+        raise FileNotFoundError(
+            f"{kind} file not found: {path} "
+            f"(resolved relative to config directory {primary_config_dir()})"
+        )
     return _parse_spec_bytes(path.read_bytes(), str(path))
 
 
@@ -88,7 +91,7 @@ def _patch_file_paths() -> list[Path]:
 def _apply_openapi_patches(spec: dict[str, Any]) -> dict[str, Any]:
     patched = spec
     for path in _patch_file_paths():
-        patch = _read_local_spec(path)
+        patch = _read_local_spec(path, kind="OpenAPI patch")
         patched = _deep_merge_openapi(patched, patch)
     return patched
 
