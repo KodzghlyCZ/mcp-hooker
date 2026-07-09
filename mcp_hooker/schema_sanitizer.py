@@ -211,26 +211,17 @@ def _rewrite_paginated_list_schema(
     if not isinstance(items, dict):
         items = {}
 
+    # Keep the envelope minimal and OpenAPI 3.0-compatible. FastMCP's spec parser
+    # rejects JSON Schema union types (e.g. type: ["integer", "null"]); nullable
+    # page fields and extra totals are covered by additionalProperties.
     return {
         "type": "object",
         "additionalProperties": True,
         "properties": {
             "page": {"type": "integer"},
-            "per": {"type": "integer"},
-            "prev_page": {"type": ["integer", "null"]},
-            "next_page": {"type": ["integer", "null"]},
-            "total_pages": {"type": "integer"},
-            "total_results": {"type": "integer"},
-            "total_writable_results": {"type": "integer"},
-            "total_virtuals": {"type": "integer"},
-            "counters": {"nullable": True},
             items_key: {
                 "type": "array",
                 "items": copy.deepcopy(items),
-            },
-            "unread_object_ids": {
-                "type": "array",
-                "items": {"type": "integer"},
             },
         },
         "required": ["page", items_key],

@@ -93,9 +93,11 @@ response schema for a generic object so MCP clients can still load the tool.
 
 When `paginated_lists.enabled` is true, GET operations that accept `page` or
 `per` query parameters and declare a bare JSON array response are rewritten to
-an object envelope (`page`, `results`, optional totals, `additionalProperties:
-true`). This matches APIs such as Caflou that paginate list responses even when
-the upstream OpenAPI spec still documents a plain array.
+a minimal object envelope (`page`, `results`, `additionalProperties: true`).
+Extra pagination fields from the live API (`prev_page`, `total_results`, etc.)
+are allowed via `additionalProperties` and do not need to be listed explicitly.
+The envelope uses OpenAPI 3.0 syntax only (no JSON Schema union types such as
+`type: ["integer", "null"]`, which FastMCP's spec parser rejects).
 
 ### OpenAPI patch files
 

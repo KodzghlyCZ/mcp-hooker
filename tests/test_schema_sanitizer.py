@@ -21,6 +21,7 @@ def test_rewrite_paginated_list_schema_wraps_array_items():
     assert rewritten["required"] == ["page", "results"]
     assert rewritten["properties"]["results"]["type"] == "array"
     assert rewritten["properties"]["results"]["items"] == schema["items"]
+    assert "prev_page" not in rewritten["properties"]
 
 
 def test_rewrite_paginated_list_schema_ignores_non_array():
