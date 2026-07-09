@@ -52,6 +52,7 @@ export MCP_HOOKER_CONFIG_FILES=config.yaml,config.docker.yaml
 | `server.port` | Bind port |
 | `openapi.spec` | Remote URL or local path to OpenAPI JSON/YAML |
 | `openapi.fetch_timeout` | Timeout when downloading remote specs (seconds) |
+| `openapi.patch_files` | Local YAML/JSON overlays deep-merged into the parsed OpenAPI spec, resolved relative to the primary config file |
 | `openapi.sanitizer.enabled` | Inline local response-schema refs before FastMCP conversion |
 | `openapi.sanitizer.on_unresolved` | `preserve` or `replace_generic` when local refs still cannot be resolved |
 | `api.base_url` | Upstream API base URL (falls back to `servers[0].url` in the spec) |
@@ -84,6 +85,57 @@ The sanitizer only touches response schemas. It inlines local
 `#/components/schemas/...` refs before handing the spec to FastMCP. If recursive
 or otherwise unresolved local refs remain, `replace_generic` swaps the affected
 response schema for a generic object so MCP clients can still load the tool.
+
+### OpenAPI patch files
+
+If the upstream spec is incomplete or needs local corrections, you can layer one
+or more patch files on top of the downloaded spec before FastMCP ingests it:
+
+```yaml
+openapi:
+  spec: https://app.caflou.com/api/v1/i/docs/openapi/v1/openapi.yaml
+  patch_files:
+    - examples/caflou.accounts.patch.yaml
+```
+
+Patch files are parsed as YAML/JSON objects and deep-merged into the OpenAPI
+document. Mappings are merged recursively; lists are replaced in full. This
+keeps the server spec-driven even when the upstream file is re-downloaded
+periodically. Relative patch paths are resolved against the directory of the
+primary config file (the first file in `MCP_HOOKER_CONFIG_FILES`, or
+`config.yaml` by default).
+
+Example Caflou patch for the missing `GET /api/v1/accounts` endpoint:
+
+```yaml
+paths:
+  /api/v1/accounts:
+    get:
+      tags:
+        - Accounts
+      operationId: List_Accounts
+      summary: List accounts
+      responses:
+        "200":
+          description: Accounts visible to the current token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                required:
+                  - result
+                x-fastmcp-wrap-result: true
+```
+
+The repository includes that example as
+`examples/caflou.accounts.patch.yaml`. After reload, FastMCP should expose a
+generated `List_Accounts` MCP tool if the upstream API accepts the request.
 
 Set the value via the environment (never commit it). With Docker Compose, copy
 `.env.example` to `.env` and fill in `CAFLOU_API_TOKEN`; the token is passed

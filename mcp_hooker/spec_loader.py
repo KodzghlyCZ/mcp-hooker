@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import httpx
 import yaml
 
-from mcp_hooker.settings import cfg_get, project_root
+from mcp_hooker.settings import cfg_get, primary_config_dir, project_root
 from mcp_hooker.schema_sanitizer import sanitize_openapi_spec
 
 
@@ -37,6 +37,60 @@ def _read_local_spec(path: Path) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"OpenAPI spec file not found: {path}")
     return _parse_spec_bytes(path.read_bytes(), str(path))
+
+
+def _resolve_local_path(path_str: str) -> Path:
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = project_root() / path
+    return path
+
+
+def _resolve_patch_path(path_str: str) -> Path:
+    path = Path(path_str)
+    if not path.is_absolute():
+        path = primary_config_dir() / path
+    return path
+
+
+def _deep_merge_openapi(base: Any, patch: Any) -> Any:
+    """Merge OpenAPI-like objects, replacing lists predictably."""
+    if isinstance(base, dict) and isinstance(patch, dict):
+        merged = dict(base)
+        for key, patch_value in patch.items():
+            if key in merged:
+                merged[key] = _deep_merge_openapi(merged[key], patch_value)
+            else:
+                merged[key] = patch_value
+        return merged
+
+    # Lists are replaced rather than merged; OpenAPI list merge semantics are ambiguous.
+    if isinstance(patch, list):
+        return list(patch)
+
+    return patch
+
+
+def _patch_file_paths() -> list[Path]:
+    raw = cfg_get("openapi.patch_files", default=[]) or []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    paths: list[Path] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        paths.append(_resolve_patch_path(entry.strip()))
+    return paths
+
+
+def _apply_openapi_patches(spec: dict[str, Any]) -> dict[str, Any]:
+    patched = spec
+    for path in _patch_file_paths():
+        patch = _read_local_spec(path)
+        patched = _deep_merge_openapi(patched, patch)
+    return patched
 
 
 async def _fetch_remote_spec(url: str, headers: dict[str, str], timeout: float) -> dict[str, Any]:
@@ -78,10 +132,10 @@ async def load_openapi_spec() -> dict[str, Any]:
 
     if _looks_like_url(location):
         spec = await _fetch_remote_spec(location, headers=headers, timeout=timeout)
+        spec = _apply_openapi_patches(spec)
         return sanitize_openapi_spec(spec, sanitizer)
 
-    path = Path(location)
-    if not path.is_absolute():
-        path = project_root() / path
+    path = _resolve_local_path(location)
     spec = _read_local_spec(path)
+    spec = _apply_openapi_patches(spec)
     return sanitize_openapi_spec(spec, sanitizer)

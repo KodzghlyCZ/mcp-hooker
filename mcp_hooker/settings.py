@@ -22,7 +22,7 @@ def project_root() -> Path:
     return Path.cwd()
 
 
-def _resolve_paths() -> list[str]:
+def resolve_config_paths() -> list[Path]:
     root = project_root()
     explicit = os.environ.get("MCP_HOOKER_CONFIG_FILES", "").strip()
     if explicit:
@@ -33,20 +33,27 @@ def _resolve_paths() -> list[str]:
                 continue
             path = Path(entry)
             paths.append(path if path.is_absolute() else root / path)
-        return [str(p) for p in paths]
+        return paths
 
     paths = [root / "config.yaml"]
     local_overlay = root / "config.local.yaml"
     if local_overlay.is_file():
         paths.append(local_overlay)
-    return [str(p) for p in paths]
+    return paths
+
+
+def primary_config_dir() -> Path:
+    paths = resolve_config_paths()
+    if not paths:
+        return project_root()
+    return paths[0].parent
 
 
 def ensure_config_loaded() -> None:
     global _LOADED
     if _LOADED:
         return
-    paths = _resolve_paths()
+    paths = [str(p) for p in resolve_config_paths()]
     if not paths:
         raise FileNotFoundError("No mcp-hooker config files configured")
     if not Path(paths[0]).is_file():

@@ -10,6 +10,9 @@ openapi:
   # Remote URL or local path (relative to project root or absolute).
   spec: https://app.caflou.com/api/v1/i/docs/openapi/v1/openapi.yaml
   fetch_timeout: 30.0
+  # Optional local YAML/JSON overlays applied after downloading/parsing the spec.
+  # Paths are resolved relative to MCP_HOOKER_ROOT / project root.
+  patch_files: []
   sanitizer:
     # Preprocess response schemas before FastMCP ingests the OpenAPI spec.
     enabled: false

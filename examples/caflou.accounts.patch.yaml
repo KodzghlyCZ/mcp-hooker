@@ -1,0 +1,24 @@
+paths:
+  /api/v1/accounts:
+    get:
+      tags:
+        - Accounts
+      operationId: List_Accounts
+      summary: List accounts
+      description: Return accounts available to the current Caflou API token.
+      responses:
+        "200":
+          description: Accounts visible to the current token.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: true
+                required:
+                  - result
+                x-fastmcp-wrap-result: true
