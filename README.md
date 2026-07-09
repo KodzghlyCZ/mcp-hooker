@@ -53,6 +53,7 @@ export MCP_HOOKER_CONFIG_FILES=config.yaml,config.docker.yaml
 | `openapi.spec` | Remote URL or local path to OpenAPI JSON/YAML |
 | `openapi.fetch_timeout` | Timeout when downloading remote specs (seconds) |
 | `openapi.patch_files` | Local YAML/JSON overlays deep-merged into the parsed OpenAPI spec, resolved relative to the primary config file |
+| `openapi.validate_output` | When `false`, disable FastMCP strict output-schema validation on tool responses (default `true`) |
 | `openapi.sanitizer.enabled` | Inline local response-schema refs before FastMCP conversion |
 | `openapi.sanitizer.on_unresolved` | `preserve` or `replace_generic` when local refs still cannot be resolved |
 | `openapi.sanitizer.paginated_lists.enabled` | Rewrite GET list endpoints (`page`/`per` params) from bare arrays to paginated object envelopes |

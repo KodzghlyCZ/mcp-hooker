@@ -119,10 +119,16 @@ async def create_mcp_server() -> tuple[FastMCP, httpx.AsyncClient, dict[str, Any
         timeout=_api_timeout(),
         follow_redirects=True,
     )
+    validate_output = cfg_bool("openapi.validate_output", default=True)
+    if not validate_output:
+        logger.warning(
+            "openapi.validate_output is false; FastMCP will not strictly validate tool outputs"
+        )
     mcp = FastMCP.from_openapi(
         openapi_spec=spec,
         client=client,
         name=_server_name(),
+        validate_output=validate_output,
     )
     return mcp, client, {"spec": spec, "base_url": base_url}
 

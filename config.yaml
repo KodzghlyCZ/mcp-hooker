@@ -13,6 +13,8 @@ openapi:
   # Optional local YAML/JSON overlays applied after downloading/parsing the spec.
   # Paths are resolved relative to MCP_HOOKER_ROOT / project root.
   patch_files: []
+  # When false, skip FastMCP strict output-schema validation on tool responses.
+  validate_output: false
   sanitizer:
     # Preprocess response schemas before FastMCP ingests the OpenAPI spec.
     enabled: true
