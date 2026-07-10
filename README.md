@@ -18,6 +18,7 @@ mcp-hooker/
   mcp_hooker/
     settings.py         # yayaya loader
     spec_loader.py      # fetch/parse OpenAPI
+    route_filters.py    # openapi.tools_filter → FastMCP route_map_fn
     server.py           # reloadable HTTP MCP server
 ```
 
@@ -48,12 +49,16 @@ export MCP_HOOKER_CONFIG_FILES=config.yaml,config.docker.yaml
 | Path | Description |
 |------|-------------|
 | `server.name` | MCP server display name |
+| `server.instructions` | Optional MCP `initialize` instructions string (injected into LLM context) |
+| `server.website_url` | Optional MCP server website URL |
+| `server.version` | Optional MCP server version string |
 | `server.host` | Bind address |
 | `server.port` | Bind port |
 | `openapi.spec` | Remote URL or local path to OpenAPI JSON/YAML |
 | `openapi.fetch_timeout` | Timeout when downloading remote specs (seconds) |
 | `openapi.patch_files` | Local YAML/JSON overlays deep-merged into the parsed OpenAPI spec, resolved relative to the primary config file |
 | `openapi.validate_output` | When `false`, disable FastMCP strict output-schema validation on tool responses (default `true`) |
+| `openapi.tools_filter` | Per-instance OpenAPI operation filter (`enabled`, optional `file`, or inline rules). See `examples/tools_filter.example.yaml` |
 | `openapi.sanitizer.enabled` | Inline local response-schema refs before FastMCP conversion |
 | `openapi.sanitizer.on_unresolved` | `preserve` or `replace_generic` when local refs still cannot be resolved |
 | `openapi.sanitizer.paginated_lists.enabled` | Rewrite GET list endpoints (`page`/`per` params) from bare arrays to paginated object envelopes |
