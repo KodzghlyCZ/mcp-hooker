@@ -35,6 +35,7 @@ class ServerState:
     client: httpx.AsyncClient | None = None
     spec_source: str = ""
     base_url: str = ""
+    tool_count: int = 0
     reload_lock: asyncio.Lock | None = None
     reload_task: asyncio.Task[None] | None = None
     mcp_lifespan: AbstractAsyncContextManager[None] | None = field(default=None, repr=False)
@@ -45,6 +46,35 @@ state = ServerState()
 
 def _server_name() -> str:
     return str(cfg_get("server.name", default="mcp-hooker"))
+
+
+def _optional_server_text(path: str) -> str | None:
+    value = cfg_get(path, default="")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        value = str(value)
+    value = value.strip()
+    return value or None
+
+
+def _fastmcp_settings() -> dict[str, Any]:
+    """Optional MCP server metadata from config (initialize response)."""
+    settings: dict[str, Any] = {}
+
+    instructions = _optional_server_text("server.instructions")
+    if instructions:
+        settings["instructions"] = instructions
+
+    website_url = _optional_server_text("server.website_url")
+    if website_url:
+        settings["website_url"] = website_url
+
+    version = _optional_server_text("server.version")
+    if version:
+        settings["version"] = version
+
+    return settings
 
 
 def _api_timeout() -> float:
@@ -130,7 +160,13 @@ async def create_mcp_server() -> tuple[FastMCP, httpx.AsyncClient, dict[str, Any
         "client": client,
         "name": _server_name(),
         "validate_output": validate_output,
+        **_fastmcp_settings(),
     }
+    if openapi_kwargs.get("instructions"):
+        logger.info(
+            "MCP instructions loaded from config (%s chars)",
+            len(openapi_kwargs["instructions"]),
+        )
     route_map_fn = build_route_map_fn()
     if route_map_fn is not None:
         openapi_kwargs["route_map_fn"] = route_map_fn
@@ -160,6 +196,7 @@ async def reload_server(*, reason: str = "manual", manage_lifespan: bool = True)
         state.mcp_app = mcp.http_app(**_http_app_options())
         state.spec_source = resolve_spec_location()
         state.base_url = meta["base_url"]
+        state.tool_count = tool_count
 
         if manage_lifespan:
             await _start_mcp_lifespan()
@@ -188,6 +225,7 @@ async def _health(_request: Request) -> JSONResponse:
             "status": "ok",
             "spec": state.spec_source,
             "base_url": state.base_url,
+            "tool_count": state.tool_count,
         }
     )
 
