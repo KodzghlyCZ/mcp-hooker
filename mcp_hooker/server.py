@@ -22,6 +22,7 @@ from mcp_hooker.settings import (
     cfg_optional_int,
     reload_settings,
 )
+from mcp_hooker.route_filters import build_route_map_fn, tools_filter_enabled
 from mcp_hooker.spec_loader import load_openapi_spec, resolve_base_url, resolve_spec_location
 
 logger = logging.getLogger(__name__)
@@ -124,12 +125,18 @@ async def create_mcp_server() -> tuple[FastMCP, httpx.AsyncClient, dict[str, Any
         logger.warning(
             "openapi.validate_output is false; FastMCP will not strictly validate tool outputs"
         )
-    mcp = FastMCP.from_openapi(
-        openapi_spec=spec,
-        client=client,
-        name=_server_name(),
-        validate_output=validate_output,
-    )
+    openapi_kwargs: dict[str, Any] = {
+        "openapi_spec": spec,
+        "client": client,
+        "name": _server_name(),
+        "validate_output": validate_output,
+    }
+    route_map_fn = build_route_map_fn()
+    if route_map_fn is not None:
+        openapi_kwargs["route_map_fn"] = route_map_fn
+    elif tools_filter_enabled():
+        logger.warning("openapi.tools_filter.enabled is true but no route_map_fn was built")
+    mcp = FastMCP.from_openapi(**openapi_kwargs)
     return mcp, client, {"spec": spec, "base_url": base_url}
 
 

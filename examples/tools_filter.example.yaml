@@ -1,0 +1,49 @@
+# Example openapi.tools_filter rules (reference only).
+# Reference from config:
+#
+# openapi:
+#   tools_filter:
+#     enabled: true
+#     file: tools_filter.yaml
+#
+# Or inline the same keys under openapi.tools_filter.
+# When both inline keys and file are set, the file overlays inline rules.
+
+# Allowlist mode: only expose operations tagged with any of these tags.
+# include_tags:
+#   - Projects
+#   - Tasks
+
+# Denylist mode: drop entire OpenAPI tags.
+exclude_tags:
+  - Internal
+  - AdminUI
+
+# Regexes matched against the OpenAPI path string (case-sensitive).
+exclude_path_patterns:
+  - "/login$"
+  - "dashboard"
+  - "kanban"
+
+# Allowlist mode: only paths matching at least one pattern are exposed.
+# include_path_patterns:
+#   - "^/api/v1/projects"
+
+# Optional HTTP method filters (uppercase in config; matched case-insensitively).
+# exclude_methods:
+#   - DELETE
+
+# Optional operationId filters (use upstream operationId values).
+# include_operation_ids:
+#   - list_projects
+# exclude_operation_ids:
+#   - dangerous_purge
+
+# Per-tag path allowlists: when an operation has one of the listed tags,
+# it is exposed only if its path matches keep_path_patterns; otherwise excluded.
+tag_path_rules:
+  - tags: [Users]
+    keep_path_patterns:
+      - "/users$"
+      - "/users/all$"
+      - "/users/\\{id\\}$"

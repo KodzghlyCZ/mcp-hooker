@@ -2,7 +2,7 @@
 
 > Maintainer reference for **what** this service does, **how** it is configured, and **how** to operate it in production.
 >
-> Last updated: 2026-07-08
+> Last updated: 2026-07-09
 
 ---
 
@@ -25,6 +25,7 @@
 15. [OpenAPI spec quality](#15-openapi-spec-quality)
 16. [Troubleshooting](#16-troubleshooting)
 17. [Decision log](#17-decision-log)
+18. [Lessons learned & incident playbook](#18-lessons-learned--incident-playbook)
 
 ---
 
@@ -45,6 +46,8 @@ Use it when you want an LLM/MCP client to call an existing REST API without hand
 
 **Production (jbi-sv-00):** `https://mcp-hooker.catania-service.cz/caflou/mcp` — nginx → Kong (`key-auth` + ACL + CORS) → `caflou-app-1:8000`.
 
+**Debugging reference:** [§18 Lessons learned & incident playbook](#18-lessons-learned--incident-playbook) — consolidated trial-and-error from production bring-up.
+
 ---
 
 ## 2. Architecture
@@ -63,6 +66,8 @@ Use it when you want an LLM/MCP client to call an existing REST API without hand
 │ spec_loader                                                  │
 │   remote URL ──► httpx GET ──► parse JSON/YAML              │
 │   local path ──► read file ──► parse JSON/YAML              │
+│   openapi.patch_files ──► deep-merge overlays                │
+│   schema_sanitizer ──► fix response schemas for FastMCP      │
 └───────────────────────────┬─────────────────────────────────┘
                             │
                             ▼
@@ -147,9 +152,94 @@ Relative paths in `MCP_HOOKER_CONFIG_FILES` and `openapi.spec` resolve against t
 |-----|-------|
 | `openapi.spec` | URL or filesystem path (required) |
 | `openapi.fetch_timeout` | Seconds when downloading remote specs |
-| `api.base_url` | Upstream base URL; required when spec has no usable `servers[0].url` |
+| `openapi.patch_files` | List of local YAML/JSON overlays deep-merged into the parsed spec after fetch; paths relative to the **primary config file directory** (see below) |
+| `openapi.validate_output` | When `false`, disable FastMCP strict output-schema validation on tool responses (default `true`). Caflou production uses `false` because live responses often diverge from the published spec |
+| `openapi.tools_filter.enabled` | When `true`, apply `openapi.tools_filter` rules before FastMCP builds tools |
+| `openapi.tools_filter.file` | Optional YAML file (path relative to primary config dir) with filter rules; overlays inline keys |
+| `openapi.tools_filter.include_tags` | Allowlist: only operations with any listed OpenAPI tag are exposed |
+| `openapi.tools_filter.exclude_tags` | Denylist: drop operations with any listed tag |
+| `openapi.tools_filter.include_path_patterns` | Allowlist: path must match at least one regex |
+| `openapi.tools_filter.exclude_path_patterns` | Denylist: drop when path matches any regex |
+| `openapi.tools_filter.include_methods` / `exclude_methods` | Optional HTTP method allow/deny lists |
+| `openapi.tools_filter.include_operation_ids` / `exclude_operation_ids` | Optional `operationId` allow/deny lists |
+| `openapi.tools_filter.tag_path_rules` | Per-tag path allowlists — see [tools filter](#openapi-tools-filter) |
+| `openapi.sanitizer.enabled` | Preprocess **response schemas** before FastMCP ingests the spec |
+| `openapi.sanitizer.on_unresolved` | `preserve` (log warning) or `replace_generic` (swap unresolved local refs for `{type: object}`) |
+| `openapi.sanitizer.paginated_lists.enabled` | Rewrite GET list endpoints (`page`/`per` query params) from bare JSON arrays to paginated object envelopes |
+| `openapi.sanitizer.paginated_lists.items_key` | Array field name in paginated responses (default `results`; Caflou uses `results`) |
+| `api.base_url` | Upstream base URL; **host only** when spec paths already include `/api/v1/...` (see [§18](#18-lessons-learned--incident-playbook)) |
 | `api.timeout` | httpx timeout for tool calls |
 | `api.headers` | Extra request headers; values support `${ENV_VAR}` via yayaya |
+
+**`api.base_url` rule of thumb:** httpx joins `base_url` + operation `path`. If every path in the spec already starts with `/api/v1/`, set `base_url` to `https://app.caflou.com` — **not** `https://app.caflou.com/api/v1`. mcp-hooker logs a startup/reload `WARNING` when it detects a doubled prefix.
+
+### OpenAPI patch files
+
+Upstream specs are often incomplete or wrong. Layer local corrections without forking the remote file:
+
+```yaml
+openapi:
+  spec: https://app.caflou.com/api/v1/i/docs/openapi/v1/openapi.yaml
+  patch_files:
+    - examples/caflou.accounts.patch.yaml
+```
+
+- Patches are **deep-merged** into the downloaded spec (mappings recurse; lists are replaced wholesale).
+- Relative paths resolve against the directory of the **primary** config file (the first entry in `MCP_HOOKER_CONFIG_FILES`).
+- In production, mount the whole instance config directory — not just `config.yaml` — so patch files are visible inside the container. See [§18 — Instance config vs runtime data](#instance-config-vs-runtime-data-docker).
+
+Example: Caflou's published spec includes `GET /api/v1/accounts` but with minimal metadata (no `operationId`, bare `200` response). A patch adds stable `operationId: List_Accounts`, a clearer description, and a safe output schema for MCP clients. See `examples/caflou.accounts.patch.yaml`.
+
+**Caflou production (Profile A):** `openapi.tools_filter.enabled: true` with instance file `tools_filter.yaml` trims **477 → ~212** tools. See `examples/tools_filter.example.yaml` for the generic schema.
+
+### OpenAPI tools filter
+
+Large OpenAPI specs can exceed MCP client tool limits (e.g. Claude web ~256). mcp-hooker can drop or allowlist operations **before** FastMCP builds tools. Rules are **per instance** — nothing is hardcoded per upstream API.
+
+```yaml
+openapi:
+  tools_filter:
+    enabled: true
+    file: tools_filter.yaml   # optional; path relative to config dir
+    # or inline any of the keys below (file overlays inline)
+```
+
+**Evaluation order** (first match wins):
+
+1. `include_operation_ids` / `exclude_operation_ids`
+2. `include_methods` / `exclude_methods`
+3. `tag_path_rules` — if operation has a listed tag, keep only when path matches `keep_path_patterns`
+4. `include_tags` — allowlist by tag
+5. `exclude_tags` — denylist by tag
+6. `include_path_patterns` — allowlist by path regex
+7. `exclude_path_patterns` — denylist by path regex
+
+Reference: `examples/tools_filter.example.yaml`.
+
+### Response schema sanitizer
+
+Caflou's OpenAPI has several problems that break or confuse FastMCP:
+
+| Problem | Symptom | Sanitizer fix |
+|---------|---------|---------------|
+| List endpoints declare `type: array` but API returns `{page, results, ...}` | FastMCP output validation fails on tool calls | `paginated_lists.enabled: true` rewrites array → object envelope |
+| Recursive/unresolved `#/components/schemas/...` refs in responses | Tool load warnings or client errors | `on_unresolved: preserve` or `replace_generic` |
+| JSON Schema union types (`type: ["integer", "null"]`) | FastMCP spec parser rejects schema **at startup** (container never healthy) | Sanitizer uses OpenAPI 3.0-only syntax; envelope uses `additionalProperties: true` for extra pagination fields — see [§18](#paginated-lists-three-layer-mismatch-2026-07-09) |
+
+Production Caflou config:
+
+```yaml
+openapi:
+  validate_output: false
+  sanitizer:
+    enabled: true
+    on_unresolved: preserve
+    paginated_lists:
+      enabled: true
+      items_key: results
+```
+
+The sanitizer only touches **response** schemas, not request bodies or paths.
 
 ### Reload keys
 
@@ -316,6 +406,42 @@ Use the **public** URL including `/mcp` — not `/caflou` alone. Kong `strip_pat
 
 Bearer tokens in `Authorization` are an alternative if you configure Kong `key-auth` with a custom header name — `apikey` is what we use on jbi-sv-00.
 
+### Registering a remote MCP server in Cursor
+
+Remote streamable-HTTP MCP servers go in **`~/.cursor/mcp.json`** (user-level, not workspace):
+
+```json
+{
+  "mcpServers": {
+    "mcp-hooker-caflou": {
+      "url": "https://mcp-hooker.catania-service.cz/caflou/mcp",
+      "headers": {
+        "apikey": "YOUR_KONG_KEY"
+      }
+    }
+  }
+}
+```
+
+**Checklist:**
+
+| Step | Detail |
+|------|--------|
+| URL | Must include `/mcp` — not `/caflou` alone |
+| Header name | Must match Kong `key-auth` `key_names` (default `apikey`, not `Authorization`) |
+| Save + reload | Save `mcp.json`, then **reload Cursor window** or restart Cursor |
+| New chat | Start a **new agent/chat session** after reload — existing sessions keep the old MCP tool list |
+| Verify | Ask the agent which MCP tools it can access; `mcp-hooker-caflou` should appear alongside other servers |
+
+**Common registration mistakes:**
+
+- Entry is valid JSON but Cursor was not reloaded → server never attaches to new sessions.
+- API key in `mcp.json` is correct but Kong consumer lacks the matching **ACL group** → 403 on connect.
+- Using `http://localhost:8040/mcp_hooker_caflou/mcp` for local Kong testing works, but production clients should use the public HTTPS URL through nginx.
+- Storing the Kong key in git — keep it in `mcp.json` locally or use env substitution if your Cursor version supports it; treat like a password.
+
+Contrast with **stdio** servers (e.g. `zpl-mcp`, `ElevenLabs`) which use `command` + `args` instead of `url`.
+
 ---
 
 ## 5. Backend example: Caflou
@@ -364,6 +490,15 @@ server:
 
 openapi:
   spec: https://app.caflou.com/api/v1/i/docs/openapi/v1/openapi.yaml
+  validate_output: false
+  patch_files:
+    - patch.yaml          # relative to config file dir (e.g. /app/instance-config/)
+  sanitizer:
+    enabled: true
+    on_unresolved: replace_generic   # required for Cursor (List_TaskTodos $ref issue)
+    paginated_lists:
+      enabled: true
+      items_key: results
 
 api:
   base_url: https://app.caflou.com
@@ -376,7 +511,7 @@ reload:
 
 ```bash
 export CAFLOU_API_TOKEN="…"   # from Caflou Settings → Account settings → API
-docker compose up -d --build
+docker compose up -d --force-recreate   # after image or mounted config/patch changes
 ```
 
 Client auth (who may reach mcp-hooker) is handled separately by Kong `key-auth` + ACL ([§4](#4-authentication), [§6](#6-production-deployment-caflou-jbi-sv-00)).
@@ -396,6 +531,11 @@ Use this when you want the long-lived Caflou token to live only in the gateway/s
 - Default list page size is 20; `per` query param can go up to 1000 (use carefully — rate limits apply).
 - Filtering is supported via a `filter` object on list requests; see spec description for examples.
 - Treat MCP tool access as **full API access** within the token's granted permissions.
+- **Discover account ID first:** call `List_Accounts` (patched `operationId` on existing `GET /api/v1/accounts`) — returns `[{name, id, role}]`; use `id` as `account_id` in other tools.
+- **MCP handshake ≠ upstream auth:** `initialize` and `tools/list` succeed even when `CAFLOU_API_TOKEN` is missing; only actual tool calls hit Caflou and will `401`.
+- **Spec vs reality:** list endpoints return paginated objects (`{page, results, prev_page, ...}`) but the published spec often declares a bare array — enable `sanitizer.paginated_lists` and/or `validate_output: false`. Full trial-and-error narrative: [§18 — Paginated lists](#paginated-lists-three-layer-mismatch-2026-07-09).
+- **Opaque tool names:** MCP tools use upstream `operationId` values (`List_21`, `Create_13`, …). See [§18 — tool name map](#caflou-mcp-tool-names-opaque-operationids) and [agent workflow recipes](#agent-workflow-recipes-verified-2026-07-09).
+- **No reliable server-side text search via MCP today:** `Search_2` lacks query params in the tool schema — paginate list endpoints and filter client-side ([§18 — search limitations](#caflou-search-limitations)).
 
 See [§6](#6-production-deployment-caflou-jbi-sv-00) for the live **mcp-hooker-caflou** stack on jbi-sv-00 (nginx → Kong → container).
 
@@ -403,9 +543,11 @@ See [§6](#6-production-deployment-caflou-jbi-sv-00) for the live **mcp-hooker-c
 
 ## 6. Production deployment: Caflou (jbi-sv-00)
 
-**Status:** Fixed 2026-07-08. MCP responds end-to-end (**477 tools**) at `https://mcp-hooker.catania-service.cz/caflou/mcp`.
+**Status:** Fixed 2026-07-08 (chain). **2026-07-09:** Cursor client loading fixed via response schema sanitizer (`replace_generic`); `List_Accounts` patch + instance config dir mount documented in [§18](#18-lessons-learned--incident-playbook). **2026-07-09 (later):** Caflou list-tool output validation — `paginated_lists` sanitizer + `validate_output: false`; full trial-and-error in [§18 — Paginated lists](#paginated-lists-three-layer-mismatch-2026-07-09). MCP responds at `https://mcp-hooker.catania-service.cz/caflou/mcp` (**477 tools** — count unchanged when patching existing paths).
 
 Infra layout follows `deploy/mcp-hooker/instances/<name>/` (spliffy pattern). Live Caflou instance: Docker project `caflou`, container `caflou-app-1`, network `caflou_internal`.
+
+**Config layout:** instance files (`config.yaml`, `patch.yaml`) bind to `/app/instance-config/`; runtime secrets (`.env`) stay in `/var/www/mcp-hooker/<project>/` → `/instance`. See [§18 — Instance config vs runtime data](#instance-config-vs-runtime-data-docker).
 
 ### Request chain
 
@@ -626,6 +768,50 @@ Same host, multiple APIs:
 | `/edu-gov-cz/mcp` | `/mcp_hooker_edu_gov_cz` | `edu-gov-cz-app-1` | `mcp-hooker-edu-gov-cz` |
 
 nginx: `rewrite ^/caflou(.*)$ /mcp_hooker_caflou$1 break;` per location block.
+
+### Production bring-up chronology (2026-07-08)
+
+Step-by-step record of what we tried, what failed, and what fixed it. Use as a checklist when adding the next instance.
+
+| # | Symptom | Layer | Cause | Fix |
+|---|---------|-------|-------|-----|
+| 1 | `404` from `nginx/1.18` | nginx | `location /caflou` not in `listen 443 ssl` block (Certbot split HTTP/HTTPS) | Move location into SSL server block |
+| 2 | Kong `404`, `X-Kong-Response-Latency: 0` | Kong route | Wrong path — route **name** ≠ route **path** | Hit `/mcp_hooker_caflou`, not `/mcp-hooker-caflou` |
+| 3 | Kong `401` | Kong key-auth | No `apikey` header | Add Key Auth credential on consumer; send `apikey: <key>` |
+| 4 | Kong `403` with valid key | Kong ACL | Consumer not in route's `allow` group | Add ACL credential on consumer matching route ACL plugin |
+| 5 | Kong `502 Bad Gateway` | Kong → upstream | Wrong internal port (`3003` host port instead of `8000` container port) | Service port = **8000** |
+| 6 | `Connection refused` from Kong | Docker network | `kong` and `caflou-app-1` on different networks | `docker network connect caflou_internal kong` |
+| 7 | `Name or service not known` inside Kong | Docker DNS | Same as #6 | Connect containers to shared network |
+| 8 | Kong `404 no Route matched` + `Via: kong`, ~2 ms upstream latency | Kong upstream | `host=127.17.0.1` (typo — entire `127.0.0.0/8` is loopback; Kong proxied to itself) | `PATCH` service → `host=caflou-app-1` |
+| 9 | CORS error from MCP Inspector (`localhost:6274`) | Kong | Browser preflight blocked | Add Kong **CORS** plugin on route |
+| 10 | Kong `502` / `invalid response from upstream` | Kong buffering | SSE/streamable HTTP buffered by Kong's internal nginx | `KONG_NGINX_HTTP_CONFIGURATION_SNIPPET` with `proxy_buffering off`; recreate container |
+| 11 | Public IP timeout from LAN | Router NAT | Hairpin/loopback not supported (`90.178.237.94` from inside LAN) | Test with `--resolve …:127.0.0.1` or from external network |
+| 12 | MCP client hits `/caflou` not `/caflou/mcp` | Path | FastMCP mounts at `/mcp`; Kong `strip_path` strips route prefix only | Client URL must end in `/mcp` |
+| 13 | `tools/list` works, tool calls `401` | Upstream auth | `CAFLOU_API_TOKEN` missing/empty in container env | Set env + reload |
+| 14 | Every tool call `404`, URL has `/api/v1/api/v1/` | `api.base_url` | Base URL included `/api/v1` but spec paths already do | `base_url: https://app.caflou.com` (host only) |
+| 15 | Tool output validation errors on list endpoints | OpenAPI spec | Spec declares array; API returns paginated object | `sanitizer.paginated_lists.enabled: true` |
+| 16 | Cursor agent can't see `mcp-hooker-caflou` tools | Client | `mcp.json` entry present but Cursor not reloaded / old chat session | Reload window + new chat |
+| 17 | **Application startup failed** — hundreds of Pydantic errors on `prev_page` / `next_page` `type: ['integer', 'null']` | Sanitizer schema | First `paginated_lists` envelope used JSON Schema union types; FastMCP's **OpenAPI spec parser** rejects them at ingest (before any tool call) | Use OpenAPI 3.0-only envelope: `page` + `results` + `additionalProperties: true`; no `type: ["integer", "null"]` |
+| 18 | List tools still fail after pagination fix: `None is not of type 'string'` or `{user object} is not of type 'string'` | Output validation | Pagination envelope OK; **item-level** schemas wrong (nullable fields, nested objects typed as strings) | `validate_output: false` (production); or patch/sanitize component schemas |
+| 19 | `List_Accounts` tool not found in Cursor | Patch not mounted | `patch_files` set in config but `patch.yaml` not in container config dir | Mount instance config dir; see [§18 — Instance config](#instance-config-vs-runtime-data-docker) |
+| 20 | Agent passes `account_id: "Token"` literal | Tool args | Path param docs say "Account ID or Token" but API expects real account hash | Call `List_Accounts` first; use returned `id` |
+| 21 | Caflou `Search` / `Search_2` returns empty | OpenAPI + MCP | Search endpoints exist but MCP tool schema exposes only `account_id` — no `q`/`query` param wired | Paginate list endpoints and filter client-side; or extend patch/spec for search params |
+| 22 | Created project under wrong company | Data model | Only one "CATANIA*" company in CRM (`CATANIA GROUP s.r.o.`) | Confirm `company_id` via `List_3` (companies) before `Create_13` |
+
+**Kong consumer setup (OSS, free):** `key-auth` identifies *who*; `acl` restricts *what*. Add credentials on the **Consumer** (Key Auth + ACL group), not on the plugin. Apply both plugins on the **Route**, not just the Service. Plugin order: `key-auth` before `acl`.
+
+**Debugging without curl inside Kong:** the official Kong image has neither `curl` nor `wget`. Use bash socket test:
+
+```bash
+docker exec -it kong bash -c "timeout 2 bash -c '</dev/tcp/caflou-app-1/8000' && echo Success || echo Failed"
+```
+
+**Auth test matrix (Kong port 8040):**
+
+```bash
+curl -I  http://localhost:8040/mcp_hooker_caflou/mcp                    # → 401
+curl -I -H "apikey: KEY" http://localhost:8040/mcp_hooker_caflou/mcp   # → 403 if ACL wrong, else pass
+```
 
 ---
 
@@ -1033,6 +1219,8 @@ Auto-generated MCP tools are only as good as the OpenAPI document.
 
 For Caflou-sized APIs, expect **many** tools out of the box — plan gateway auth and least-privilege tokens accordingly.
 
+When the upstream spec is wrong (missing endpoints, paginated lists declared as arrays, cyclic refs), use `openapi.patch_files` and `openapi.sanitizer` — see [§3](#3-configuration) and [§18](#18-lessons-learned--incident-playbook).
+
 ---
 
 ## 16. Troubleshooting
@@ -1061,6 +1249,23 @@ For Caflou-sized APIs, expect **many** tools out of the box — plan gateway aut
 | `Connection refused` from Kong to app | Containers on different Docker networks | `docker network connect <app_network> kong`; verify with `</dev/tcp/container-name/8000>` inside Kong |
 | MCP client connects to `/caflou` not `/caflou/mcp` | App mounts MCP at `/mcp`; Kong strips route prefix | Use full URL `…/caflou/mcp` in client config |
 | `Not Acceptable: Client must accept text/event-stream` | Missing Accept header | Add `Accept: application/json, text/event-stream` (streamable HTTP) or `text/event-stream` (SSE) |
+| FastMCP output validation error on list tool | Spec says array; API returns `{page, results}` | Enable `openapi.sanitizer.paginated_lists`; or `validate_output: false` |
+| **`Application startup failed` with mass Pydantic errors on `prev_page`/`next_page` schemas** | Sanitizer used `type: ["integer", "null"]` (JSON Schema unions) | Use minimal OpenAPI 3.0 envelope only (`page`, `results`, `additionalProperties: true`); rebuild + recreate |
+| List tool returns data in error text: `None is not of type 'string'` | Item schema says `string`; API sends `null` (e.g. `first_name`) | `validate_output: false` or relax nullable fields in patch/sanitizer |
+| List tool: `{…user object…} is not of type 'string'` | `AccountUser.user` typed as `string` in spec; API returns nested object | `validate_output: false` |
+| `List_Accounts` has awkward name or missing from Cursor | Upstream spec lacks `operationId`; or Cursor schema parse failed on another tool | Patch with `operationId: List_Accounts`; fix sanitizer (`replace_generic` for `TaskTodo` ref) |
+| Unresolved `#/components/schemas/...` warnings at startup | Recursive or cyclic local refs in response schemas | `sanitizer.on_unresolved: preserve` or `replace_generic` |
+| Cursor stuck on "loading tools" then **0 tools** | Cursor fails parsing tool offerings (strict JSON Schema resolver) | Check `~/.config/Cursor/logs/.../mcp-server-user-mcp-hooker-caflou.log` for `can't resolve reference`; enable sanitizer `replace_generic` |
+| MCP Inspector lists tools but Cursor does not | Inspector tolerates broken `outputSchema` refs; Cursor does not | Same as above — server may be healthy while Cursor UI listing fails |
+| Cursor agent doesn't list mcp-hooker tools | `mcp.json` not reloaded or old chat session | Reload Cursor window; start new chat; verify `url` ends in `/mcp` |
+| Patch enabled in config but startup `FileNotFoundError: …/patch.yaml` | Only `config.yaml` mounted; patch file left on host | Mount instance config dir to `/app/instance-config`; set `MCP_HOOKER_CONFIG_FILES=/app/instance-config/config.yaml` |
+| Sanitizer enabled but `List_TaskTodos` still has broken `$ref` | Old image running; `/admin/reload` does not load new Python code | Rebuild image, `docker pull`, `docker compose up -d --force-recreate` |
+| Tool count still 477 after adding patch | Patch overlays existing path; does not add a new operation | Expected — verify patch via tool description/`operationId`, not count |
+| `tools/list` shows 477 tools but calls fail | Separate issues: MCP layer OK, upstream broken | Check `CAFLOU_API_TOKEN`, `api.base_url`, `{account_id}` in args |
+| Startup `WARNING` about doubled `/api/v1` | `api.base_url` has path prefix spec paths already include | Set host-only base URL; reload |
+| Patch file not found in Docker | Path resolved relative to config dir; only `config.yaml` mounted | Mount `instances/<name>/` → `/app/instance-config`; set `MCP_HOOKER_CONFIG_FILES=/app/instance-config/config.yaml` |
+| Kong route 404, latency 0 | Request never matched a route | Check route **path** field, not route name; check Host/header constraints |
+| `502` after fixing upstream host | Kong buffering streamable HTTP | Add `proxy_buffering off` snippet; recreate Kong container |
 
 ### Validate OpenAPI locally
 
@@ -1105,3 +1310,562 @@ Expect HTTP `200` and a session ID in logs.
 | 2026-07-08 | Kong upstream = container name :8000 | `127.17.0.1` typo caused self-proxy loop; host port 3003 ≠ container port |
 | 2026-07-08 | Client URL must include `/mcp` | FastMCP mounts at `/mcp`; Kong `strip_path` maps route prefix to upstream root |
 | 2026-07-08 | Kong ACL per route (OSS) | Prevents one API key from accessing all mcp-hooker instances |
+| 2026-07-08 | `CAFLOU_API_TOKEN` in mcp-hooker env | No upstream gateway on jbi-sv-00; Bearer injected via `api.headers` |
+| 2026-07-08 | `api.base_url` host-only for Caflou | Spec paths include `/api/v1/`; doubled prefix caused 404 |
+| 2026-07-09 | Response schema sanitizer | Caflou spec wrong on paginated lists and local refs; fix before FastMCP |
+| 2026-07-09 | `validate_output: false` for Caflou | Live API responses diverge from published schemas too often for strict validation |
+| 2026-07-09 | `paginated_lists` minimal OpenAPI 3.0 envelope | Over-specified envelope with JSON Schema unions crashed FastMCP at **spec ingest** |
+| 2026-07-09 | `openapi.patch_files` for spec overlays | Upstream Caflou spec has bare `/api/v1/accounts`; patch adds `List_Accounts` + safe schema |
+| 2026-07-09 | Patch paths relative to primary config file | Matches spliffy instance layout; avoids `MCP_HOOKER_ROOT` ambiguity |
+| 2026-07-09 | `sanitizer.on_unresolved: replace_generic` for Cursor | Unresolved `#/$defs/TaskTodo` in `List_TaskTodos` broke Cursor tool discovery |
+| 2026-07-09 | Instance config dir mount in Docker | `config.yaml` alone is insufficient when `patch_files` is set |
+| 2026-07-09 | Startup warning on doubled base path | Catch `api.base_url` footgun before tool calls fail |
+
+---
+
+## 18. Lessons learned & incident playbook
+
+Consolidated knowledge from building and debugging **mcp-hooker-caflou** (2026-07-07 → 2026-07-09). Read this before standing up the next instance.
+
+**Quick jump (2026-07-09 agent session):**
+
+- [Paginated lists — three-layer mismatch & startup crash](#paginated-lists-three-layer-mismatch-2026-07-09)
+- [Caflou MCP tool names (`List_21`, `Create_13`, …)](#caflou-mcp-tool-names-opaque-operationids)
+- [Search limitations & client-side filtering](#caflou-search-limitations)
+- [Verified agent workflows (users, tasks, projects)](#agent-workflow-recipes-verified-2026-07-09)
+
+### Three auth layers (do not mix them up)
+
+```
+Layer 1: MCP client → Kong          apikey header (Kong key-auth + ACL)
+Layer 2: Kong → mcp-hooker          (none today — trusted Docker network)
+Layer 3: mcp-hooker → Caflou API    Authorization: Bearer ${CAFLOU_API_TOKEN}
+```
+
+Fixing layer 1 does not fix layer 3. `initialize` + `tools/list` only exercise layer 1–2; tool calls hit layer 3.
+
+### URL construction (the `/api/v1` trap)
+
+```
+httpx final URL = api.base_url + operation.path
+```
+
+Caflou spec: `servers[0].url = https://app.caflou.com`, paths = `/api/v1/{account_id}/...`.
+
+| `api.base_url` | Operation path | Result |
+|----------------|----------------|--------|
+| `https://app.caflou.com` | `/api/v1/123/foo` | ✅ `https://app.caflou.com/api/v1/123/foo` |
+| `https://app.caflou.com/api/v1` | `/api/v1/123/foo` | ❌ `…/api/v1/api/v1/123/foo` |
+
+**Symptom:** MCP handshake fine, every tool call 404. **Fix:** host-only `base_url`. mcp-hooker warns at startup if it detects the pattern.
+
+### OpenAPI spec ≠ live API (Caflou)
+
+| What the spec says | What the API does | mcp-hooker mitigation |
+|--------------------|-------------------|----------------------|
+| List response: `type: array` | Returns `{page, results, prev_page, total_results, …}` | `sanitizer.paginated_lists` |
+| `GET /api/v1/accounts` present but bare (no `operationId`, weak schema) | Endpoint works; tool name/description poor for agents | `patch_files` → `examples/caflou.accounts.patch.yaml` |
+| `List_TaskTodos` outputSchema has `#/$defs/TaskTodo` without `$defs` | Cursor stuck on "loading tools" or shows **0 tools** | `sanitizer.on_unresolved: replace_generic` |
+| Strict output schemas | Extra fields in live responses | `validate_output: false` |
+| Unresolved cyclic `#/components/schemas/...` refs | FastMCP warnings | `sanitizer.on_unresolved` |
+
+**Lesson:** auto-generated tools from a remote spec are a bootstrap, not a guarantee. Budget time for patches + sanitizer tuning per upstream API.
+
+### Kong + nginx + Docker (production pattern)
+
+**External URL anatomy:**
+
+```
+https://mcp-hooker.catania-service.cz/caflou/mcp
+  │                              │      └── FastMCP mount point (required)
+  │                              └── nginx external prefix
+  └── TLS termination at nginx
+```
+
+**Internal rewrite:**
+
+```
+/caflou/mcp  →  nginx rewrite  →  /mcp_hooker_caflou/mcp  →  Kong :8040
+  →  strip_path  →  caflou-app-1:8000/mcp
+```
+
+**Rules learned the hard way:**
+
+1. nginx `location` must be in the **`listen 443 ssl`** block.
+2. Kong route **path** (`/mcp_hooker_caflou`) ≠ route **name** (`mcp-hooker-caflou`).
+3. Kong service **host** = Docker container name on a **shared network**, never `127.x.x.x` or `localhost`.
+4. Kong service **port** = container internal port (`8000`), not host-mapped port (`3003`).
+5. Kong `strip_path=true` strips the route prefix; client must still include `/mcp` because that's the app mount, not the Kong route prefix.
+6. Kong OSS **ACL** on the route prevents key reuse across instances.
+7. Kong **CORS** required for browser-based MCP Inspector.
+8. Kong image has no `curl`/`wget` — use `bash </dev/tcp/host/port>` for connectivity checks.
+9. Recreate Kong after `KONG_NGINX_HTTP_CONFIGURATION_SNIPPET` changes — reload is not enough.
+
+### MCP client registration (Cursor)
+
+```json
+"mcp-hooker-caflou": {
+  "url": "https://mcp-hooker.catania-service.cz/caflou/mcp",
+  "headers": { "apikey": "…" }
+}
+```
+
+After editing `~/.cursor/mcp.json`: save → reload Cursor → **new chat**. Existing sessions keep the old tool list.
+
+### Debugging order (when something breaks)
+
+Work outside-in:
+
+1. **Container alive?** `curl http://127.0.0.1:3003/health`
+2. **MCP handshake?** `curl -X POST …/mcp` with `initialize` (direct or via Kong)
+3. **Kong auth?** 401 → key missing; 403 → ACL wrong; 404 latency 0 → route mismatch
+4. **Kong → container?** `docker exec kong bash -c '</dev/tcp/caflou-app-1/8000'`
+5. **Upstream token?** `CAFLOU_API_TOKEN` set; `cfg_headers()` shows Bearer
+6. **Upstream URL?** no doubled `/api/v1`; check startup WARNING
+7. **Tool call args?** `{account_id}` present and correct
+8. **Output validation?** sanitizer / `validate_output` settings
+
+### Red herrings (don't waste time)
+
+| Observation | Not actually broken | Real explanation |
+|-------------|---------------------|------------------|
+| Public IP timeout from LAN | Server down | NAT hairpin unsupported on router |
+| 401 without key, 404 with key | Inconsistent Kong | 401 = key-auth stops before upstream loop; 404 with key = Kong self-proxy bug |
+| `502` + low upstream latency (~2 ms) | Slow upstream | Kong reached itself or got immediate rejection |
+| `tools/list` returns 477 tools | Upstream auth works | Tool list is built from OpenAPI spec, not live API calls |
+| Direct `curl localhost:3003/mcp` without Accept header | Server broken | MCP requires `Accept: application/json, text/event-stream` |
+| MCP Inspector shows 477 tools, Cursor shows 0 | Server down | Cursor failed during **UI tool listing** (`listOfferingsForUI`), often schema refs |
+| Enabled sanitizer in config but no effect | Config not loaded | Container still on old **image**; `/admin/reload` does not hot-load new Python modules |
+| Added `patch.yaml`, expected 478 tools | Patch not applied | `/api/v1/accounts` already in upstream spec — patch **overlays** metadata, count stays 477 |
+| `docker pull` done but behavior unchanged | Latest image running | Running container still uses old image ID until `--force-recreate` |
+
+### Cursor MCP client failures (2026-07-09 bring-up)
+
+**Symptom:** Cursor connects to `mcp-hooker-caflou`, shows "loading tools", then **0 tools** (or errored). MCP Inspector on the same URL lists **477 tools** fine.
+
+**Root cause:** Cursor's MCP client validates tool schemas when building the UI offering list. One tool — `List_TaskTodos` — had:
+
+```json
+"outputSchema": {
+  "properties": {
+    "result": {
+      "items": { "$ref": "#/$defs/TaskTodo" }
+    }
+  }
+}
+```
+
+FastMCP emitted a `$ref` to `#/$defs/TaskTodo` but did not include matching `$defs` in the tool schema. MCP Inspector tolerated it; Cursor did not.
+
+**Cursor log location (Linux):**
+
+```text
+~/.config/Cursor/logs/<session>/mcp-server-user-mcp-hooker-caflou.log
+~/.config/Cursor/logs/<session>/mcpprocess.log
+```
+
+**Smoking-gun line:**
+
+```text
+listOfferingsForUI sub-call failed: tools(...): can't resolve reference #/$defs/TaskTodo from id #
+```
+
+Earlier lines usually show `Successfully connected to streamableHttp server` — transport and Kong auth are fine; failure is **client-side schema parsing**, not connectivity.
+
+**Fix that worked:**
+
+```yaml
+openapi:
+  sanitizer:
+    enabled: true
+    on_unresolved: replace_generic
+```
+
+After deploy, `List_TaskTodos` `outputSchema` became a generic object and Cursor loaded all tools.
+
+**Important:** changing sanitizer code or defaults requires a **new container image**. `POST /admin/reload` re-reads config and re-fetches the OpenAPI spec but does **not** reload Python modules already installed in the running image.
+
+**Verify fix on live server** (no Cursor needed):
+
+```bash
+# initialize + tools/list, then inspect List_TaskTodos outputSchema
+python - <<'PY'
+import json, re, urllib.request
+url = "https://mcp-hooker.catania-service.cz/caflou/mcp"
+headers = {"apikey": "YOUR_KEY", "Content-Type": "application/json",
+           "Accept": "application/json, text/event-stream"}
+def post(p, sid=None):
+    h = {**headers, **({"mcp-session-id": sid} if sid else {})}
+    req = urllib.request.Request(url, data=json.dumps(p).encode(), method="POST", headers=h)
+    with urllib.request.urlopen(req, timeout=60) as r:
+        return dict(r.headers), r.read().decode()
+_, _ = post({"jsonrpc":"2.0","id":1,"method":"initialize",
+    "params":{"protocolVersion":"2024-11-05","capabilities":{},
+              "clientInfo":{"name":"t","version":"1"}}})
+sid = _[0]["mcp-session-id"]
+_, body = post({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}, sid)
+tools = json.loads(re.search(r"data: (\{.*\})", body, re.S).group(1))["result"]["tools"]
+for t in tools:
+    if t["name"] == "List_TaskTodos":
+        print(json.dumps(t.get("outputSchema"), indent=2)); break
+PY
+```
+
+Good: no `"$ref": "#/$defs/TaskTodo"`. Bad: still present → old image or sanitizer disabled.
+
+### Instance config vs runtime data (Docker)
+
+Production uses the spliffy-style split:
+
+| What | Host path | Container path | Purpose |
+|------|-----------|----------------|---------|
+| **Runtime** (secrets, mutable) | `/var/www/mcp-hooker/<project>/` | `/instance` | `.env` with `CAFLOU_API_TOKEN`, `RELOAD_TOKEN` |
+| **Instance config** (read-only) | `deploy/.../instances/<name>/` | `/app/instance-config` | `config.yaml`, `patch.yaml`, … |
+
+**Do not** put `.env` in the instance config bind — keep it in the runtime dir loaded via `env_file`.
+
+**Compose anchors (reference):**
+
+```yaml
+x-mcp-hooker-instance-volumes: &mcp-hooker-instance-volumes
+  - ${MCP_HOOKER_RUNTIME_BASE:-/var/www/mcp-hooker}/${COMPOSE_PROJECT_NAME}:/instance:rw
+  - type: bind
+    source: ./instances/${COMPOSE_PROJECT_NAME}
+    target: /app/instance-config
+    read_only: true
+
+x-app-env: &app-env
+  MCP_HOOKER_ROOT: /app
+  MCP_HOOKER_CONFIG_FILES: /app/instance-config/config.yaml
+```
+
+**Trial-and-error gotcha:** mounting only `config.yaml` → `/app/config.yaml` works until `openapi.patch_files` is set. With `patch_files: [patch.yaml]`, the app resolves `patch.yaml` relative to the config directory (`/app/` or `/app/instance-config/`). If the patch file is not mounted there, startup fails:
+
+```text
+FileNotFoundError: OpenAPI patch file not found: /app/patch.yaml
+(resolved relative to config directory /app)
+```
+
+**Verify inside container:**
+
+```bash
+docker compose exec app ls -la /app/instance-config/
+docker compose exec app sh -lc 'echo "$MCP_HOOKER_CONFIG_FILES"'
+docker compose exec app cat /app/instance-config/config.yaml | grep -A2 patch_files
+```
+
+### OpenAPI patches: overlay vs new tool
+
+**Expectation trap:** "I added a patch endpoint, tool count should go from 477 → 478."
+
+**Reality:** Caflou's upstream spec **already includes** `GET /api/v1/accounts`. The patch deep-merges into that path — it does not create a second operation. Tool count stays **477**.
+
+**What the patch still fixes:**
+
+| Field | Upstream spec | After patch |
+|-------|---------------|-------------|
+| `operationId` | *(missing)* | `List_Accounts` |
+| `summary` | `List` | `List accounts` |
+| `description` | generic | agent-friendly text |
+| `outputSchema` | bare `200 OK` | explicit `{result: [...]}` envelope |
+
+**Verify patch applied** — compare live tool metadata, not count:
+
+```bash
+# tools/list → List_Accounts description should match patch.yaml, not upstream "Get list of..."
+```
+
+**Call patched tool** (discover `{account_id}` for all other tools):
+
+```bash
+# MCP tools/call
+{"name": "List_Accounts", "arguments": {}}
+```
+
+Example response shape:
+
+```json
+{"result": [{"name": "…", "id": "958a30da…", "role": "collaborator"}]}
+```
+
+Use the returned `id` as `account_id` in paths like `List_ToDos`, `List_Projects`, etc.
+
+### Deploy vs reload (when each is enough)
+
+| Change | `/admin/reload` or SIGHUP | Rebuild image + recreate container |
+|--------|---------------------------|-------------------------------------|
+| `config.yaml` values | ✅ | optional |
+| `patch.yaml` content (mounted volume) | ✅ | not needed |
+| Remote OpenAPI spec updated | ✅ (re-fetches URL) | not needed |
+| New Python in `mcp_hooker/` (sanitizer, patch loader, …) | ❌ | **required** |
+| New pip dependency / FastMCP version | ❌ | **required** |
+
+**Verify running image is actually new:**
+
+```bash
+docker inspect registry…/mcp-hooker:latest --format '{{.Id}} {{.Created}}'
+docker inspect <container> --format '{{.Image}}'
+```
+
+IDs must match after `docker pull` **and** `docker compose up -d --force-recreate`. `docker pull` alone does not restart the running container.
+
+### MCP client debugging order (Cursor-specific)
+
+When Inspector works but Cursor does not:
+
+1. Read `mcp-server-user-mcp-hooker-caflou.log` — look for `listOfferingsForUI` and `can't resolve reference`
+2. Probe live `tools/list` over HTTP — confirm server returns tools
+3. Inspect offending tool `outputSchema` (often `List_TaskTodos`)
+4. Enable/fix sanitizer; **rebuild and recreate** container
+5. Reload Cursor MCP server in settings; restart Cursor if cached error persists
+6. Start a **new chat** — old sessions may retain stale tool snapshots
+
+When both Inspector and Cursor fail at connection:
+
+1. Kong `apikey` header present?
+2. URL ends with `/caflou/mcp`?
+3. Container healthy? `curl …/health`
+4. Patch file mounted? (see above)
+
+### Paginated lists: three-layer mismatch (2026-07-09)
+
+Caflou list endpoints (`GET` with `page` / `per` query params) fail in **three stacked ways**. Fix them in order — fixing layer 1 alone still leaves layer 2 or 3 broken.
+
+```
+Layer A — Published OpenAPI spec
+  200 response schema: type: array
+  items: { $ref: '#/components/schemas/AccountUser' }
+
+Layer B — FastMCP OpenAPI ingestion
+  Wraps non-object response schemas for MCP:
+  { "result": [ ... ], "x-fastmcp-wrap-result": true }
+
+Layer C — Live Caflou API
+  Returns paginated object:
+  { "page": 1, "prev_page": null, "next_page": null,
+    "results": [ ... ], "total_pages": 1, "unread_object_ids": [...] }
+```
+
+**Symptom at layer A→C (before sanitizer):**
+
+```text
+Output validation error: {'page': 1, 'results': [...], ...} is not of type 'array'
+```
+
+The error payload often **contains the real data** — the call succeeded upstream; only MCP output validation failed.
+
+**Fix layer A→C:** `openapi.sanitizer.paginated_lists.enabled: true` rewrites eligible GET list responses from bare arrays to:
+
+```yaml
+type: object
+additionalProperties: true
+properties:
+  page: { type: integer }
+  results: { type: array, items: <original items schema> }
+required: [page, results]
+```
+
+**Trial-and-error — v1 envelope broke startup (not tool calls):**
+
+First implementation added explicit `prev_page` / `next_page` with JSON Schema union types:
+
+```yaml
+prev_page: { type: ["integer", "null"] }   # ❌ do not use
+next_page: { type: ["integer", "null"] }   # ❌ do not use
+```
+
+**Result:** container never became healthy. FastMCP's OpenAPI parser (Pydantic) rejected the **entire spec at startup** — hundreds of errors like:
+
+```text
+Application startup failed. prev_page.type
+  Input should be 'string', 'number', 'integer', 'boolean', 'object' or 'array'
+  [type=literal_error, input_value=['integer', 'null'], input_type=list]
+```
+
+This is **not** a runtime tool-call failure; it happens during `FastMCP.from_openapi()` before any MCP session exists.
+
+**Fix that worked (v2 minimal envelope):** only `page` + `results` in `properties`; set `additionalProperties: true` so live fields (`prev_page`, `next_page`, `total_pages`, `unread_object_ids`, …) pass validation without being declared. No JSON Schema union types anywhere in the sanitizer output.
+
+**After pagination fix — layer B item schemas still fail:**
+
+With `paginated_lists` only, envelope validation passes but **per-item** validation still fails on real data:
+
+| Field / path | Spec says | API returns | Example error |
+|--------------|-----------|-------------|---------------|
+| `first_name` | `string` | `null` | `None is not of type 'string'` |
+| `AccountUser.user` | `string` | nested `{id, name, …}` object | `{…} is not of type 'string'` |
+
+**Pragmatic production fix:** `openapi.validate_output: false` (implemented in `mcp_hooker/server.py` → `FastMCP.from_openapi(validate_output=…)`). Logs a warning when disabled.
+
+**Verification matrix (2026-07-09, account `958a30da1d8c2ccb0a3b6194`):**
+
+| Tool | Before fixes | After `paginated_lists` only | After `validate_output: false` |
+|------|--------------|------------------------------|--------------------------------|
+| `Online` | ✅ | ✅ | ✅ |
+| `Get_19` (single resource) | ✅ | ✅ | ✅ |
+| `List_21` (users) | ❌ array vs object | ❌ field-level | ✅ |
+| `List_AccountUsers` | ❌ array vs object | ❌ field-level | ✅ |
+
+**Future hardening (optional):** extend sanitizer or patches for nullable strings and nested `$ref` objects so `validate_output` can be re-enabled.
+
+**Red herring:** Cursor cached tool descriptors may still show `outputSchema` with `result` + `x-fastmcp-wrap-result` even after the sanitizer rewrites the underlying OpenAPI response schema. Trust live `tools/call` results and server logs, not stale client-side schema snapshots.
+
+### Caflou MCP tool names (opaque `operationId`s)
+
+The upstream Caflou OpenAPI spec assigns auto-generated `operationId` values (`List_21`, `Create_13`, …). MCP tool names match these exactly. There is **no** stable human-readable alias unless you patch `operationId` in `patch_files`.
+
+**Commonly used tools (verified 2026-07-09):**
+
+| MCP tool | HTTP (approx.) | Purpose |
+|----------|----------------|---------|
+| `List_Accounts` | `GET /api/v1/accounts` | Discover `account_id` — **requires** `patch.yaml` |
+| `List_21` | `GET /api/v1/{account_id}/users` | List account users |
+| `List_AccountUsers` | `GET /api/v1/{account_id}/account_users` | Account-user links (includes nested `user`) |
+| `List_14` | `GET /api/v1/{account_id}/projects` | List projects (paginated) |
+| `List_3` | `GET /api/v1/{account_id}/companies` | List companies |
+| `List_15` | `GET /api/v1/{account_id}/tasks` | List tasks |
+| `Create_13` | `POST /api/v1/{account_id}/projects` | Create project |
+| `Create_14` | `POST /api/v1/{account_id}/tasks` | Create task |
+| `Online` | `GET /api/v1/{account_id}/online` | Lightweight connectivity / auth smoke test |
+| `Search_2` | search endpoint | **Broken for agents** — see below |
+
+**Discover the full map:** `tools/list` on the MCP server (477 tools for Caflou). Cross-reference `summary` / `description` fields or the OpenAPI spec paths.
+
+### Caflou search limitations
+
+**Do not rely on `Search_2` (or other search tools) for agent text search today.**
+
+- Caflou exposes search endpoints in the OpenAPI spec.
+- The generated MCP tool schema often exposes only `account_id` — **no** `q`, `query`, or filter text parameter is wired through to the agent.
+- Calling `Search_2` with just `account_id` returns **empty** results even when data exists.
+
+**Workaround used in production debugging:**
+
+1. Call the relevant list tool (`List_14` projects, `List_3` companies, `List_21` users, …).
+2. Paginate with `page` and `per` (up to 1000; mind rate limits).
+3. Filter matches **client-side** in the agent (name, description, custom fields).
+
+Example: finding chatbot/voicebot projects — paginate `List_14`, filter `name` / `description` for `chatbot`, `voicebot`, `voice bot`, etc. No ElevenLabs references were found in a full scan (102 projects, 81 companies, 30 tasks) using this approach (2026-07-09).
+
+### Agent workflow recipes (verified 2026-07-09)
+
+Account used in all examples: **CATANIA GROUP s.r.o.** — `account_id: 958a30da1d8c2ccb0a3b6194`.
+
+#### 0. Smoke test (no `account_id` needed for some tools)
+
+```json
+{"name": "Online", "arguments": {"account_id": "958a30da1d8c2ccb0a3b6194"}}
+```
+
+If this fails with `401`, fix `CAFLOU_API_TOKEN` before debugging list tools.
+
+#### 1. Discover `account_id` (requires patch)
+
+```json
+{"name": "List_Accounts", "arguments": {}}
+```
+
+Example response:
+
+```json
+{"result": [{"name": "CATANIA GROUP s.r.o.", "id": "958a30da1d8c2ccb0a3b6194", "role": "collaborator"}]}
+```
+
+Without `patch.yaml` mounted, this tool is missing or has a useless name — you must recover `account_id` from Caflou UI, API settings, or a prior session.
+
+#### 2. Find a user by name
+
+```json
+{"name": "List_21", "arguments": {"account_id": "958a30da1d8c2ccb0a3b6194", "page": 1, "per": 100}}
+```
+
+Filter `results` for display name or email. **Verified:** Karel Matějovský — `id: 68570`, `email: matejovsky@catania.cz`.
+
+`List_AccountUsers` also works but returns join records with a nested `user` object (triggers field-level validation errors unless `validate_output: false`).
+
+#### 3. List / filter projects
+
+```json
+{"name": "List_14", "arguments": {"account_id": "958a30da1d8c2ccb0a3b6194", "page": 1, "per": 100}}
+```
+
+Paginate until `next_page` is null. Filter client-side.
+
+#### 4. Create a task
+
+```json
+{
+  "name": "Create_14",
+  "arguments": {
+    "account_id": "958a30da1d8c2ccb0a3b6194",
+    "body": {
+      "name": "Testing task (MCP)",
+      "project_id": 614979
+    }
+  }
+}
+```
+
+**Verified:** task id `2165037` created via MCP (2026-07-09). Adjust `body` fields per OpenAPI `Create_14` request schema.
+
+#### 5. Create a project under a company
+
+1. Resolve `company_id` via `List_3` (filter for company name).
+2. Create project:
+
+```json
+{
+  "name": "Create_13",
+  "arguments": {
+    "account_id": "958a30da1d8c2ccb0a3b6194",
+    "body": {
+      "name": "Voicebot interní",
+      "company_id": 1740315
+    }
+  }
+}
+```
+
+**Verified:** project id `614979` under **CATANIA GROUP s.r.o.** (`company_id: 1740315`) — the only company matching `CATANIA*` in that account (2026-07-09).
+
+**Trial-and-error:** do not guess `company_id` from account id — companies are a separate entity list.
+
+#### 6. End-to-end agent checklist
+
+1. `List_Accounts` → `account_id`
+2. `Online` → token OK
+3. Target list tool with `page`/`per` → client-side filter
+4. Mutations (`Create_*`, `Update_*`) → read request schema from `tools/list` or OpenAPI spec
+5. If output validation errors persist after deploy → confirm `validate_output: false` **and** new image running (`--force-recreate`)
+
+### Minimal working Caflou config (copy-paste reference)
+
+```yaml
+server:
+  name: caflou-mcp
+  host_origin_protection: false
+
+openapi:
+  spec: https://app.caflou.com/api/v1/i/docs/openapi/v1/openapi.yaml
+  validate_output: false
+  patch_files:
+    - patch.yaml          # relative to config file dir (e.g. /app/instance-config/)
+  sanitizer:
+    enabled: true
+    on_unresolved: replace_generic   # required for Cursor (List_TaskTodos $ref issue)
+    paginated_lists:
+      enabled: true
+      items_key: results
+
+api:
+  base_url: https://app.caflou.com
+  headers:
+    Authorization: "Bearer ${CAFLOU_API_TOKEN}"
+```
+
+```bash
+export CAFLOU_API_TOKEN="…"
+# Mount instances/caflou/ → /app/instance-config; see §18
+docker compose up -d --force-recreate
+curl -s http://localhost:8000/health | jq
+```
