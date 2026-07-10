@@ -196,13 +196,13 @@ async def reload_server(*, reason: str = "manual", manage_lifespan: bool = True)
         state.mcp_app = mcp.http_app(**_http_app_options())
         state.spec_source = resolve_spec_location()
         state.base_url = meta["base_url"]
-        state.tool_count = tool_count
 
         if manage_lifespan:
             await _start_mcp_lifespan()
 
         info = await mcp.list_tools()
         tool_count = len(info)
+        state.tool_count = tool_count
         logger.info(
             "Reloaded MCP server (%s): spec=%s base_url=%s tools=%s",
             reason,
