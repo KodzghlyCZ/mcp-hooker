@@ -1800,6 +1800,8 @@ Example response:
 
 Without `patch.yaml` mounted, this tool is missing or has a useless name — you must recover `account_id` from Caflou UI, API settings, or a prior session.
 
+**Nested route path params:** use OpenAPI names from the tool schema — e.g. `List_Tasks_To_Dos` needs `task_id`, not `task_id__path`. Wrong names are ignored by FastMCP; the URL keeps literal `{task_id}` and Caflou may return **429**. `List_Tasks` accepts optional `filter` (see `patch.yaml`); if omitted, paginate and filter `project_id` client-side.
+
 #### 2. Find a user by name
 
 ```json

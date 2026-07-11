@@ -26,53 +26,141 @@ COMPANY_ID = int(os.environ.get("CAFLOU_COMPANY_ID", "1740315"))
 KAREL_USER_ID = int(os.environ.get("CAFLOU_USER_ID", "68570"))
 PROJECT_ID = int(os.environ.get("CAFLOU_MCP_PROJECT_ID", "615010"))
 DRY_RUN = os.environ.get("CAFLOU_SYNC_DRY_RUN", "").lower() in {"1", "true", "yes"}
+SYNC_COMMENTS = os.environ.get("CAFLOU_SYNC_COMMENTS", "").lower() in {"1", "true", "yes"}
+
+CAFLOU_BASE = "https://app.caflou.com/catania-group-s-r-o"
+
+# Known cross-references (id → display name for link text)
+LINK_PROJECTS: dict[int, str] = {
+    615009: "Voicebot interní",
+    615010: "Caflou MCP",
+    615380: "Infra interní",
+}
+LINK_TASKS: dict[int, str] = {
+    2165205: "12. Budoucí hardening",
+    2166269: "Audit nginx sites — dead backends",
+    2166547: "Validace nginx vhostů — gophish, gp, go, wazuh",
+    2167020: "17. MCP instructions — HTML rich text",
+}
+
+
+def _link_project(project_id: int, name: str | None = None) -> str:
+    label = name or LINK_PROJECTS.get(project_id, f"Projekt {project_id}")
+    return f'<a href="{CAFLOU_BASE}/projects/{project_id}">{_esc(label)}</a>'
+
+
+def _link_task(task_id: int, name: str | None = None) -> str:
+    label = name or LINK_TASKS.get(task_id, f"Úkol {task_id}")
+    return f'<a href="{CAFLOU_BASE}/tasks/{task_id}">{_esc(label)}</a>'
+
+
+def _plain_p(text: str) -> str:
+    text = text.strip()
+    if text.startswith("<"):
+        return text
+    return f"<p>{_esc(text)}</p>"
+
+
+def _esc(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def _comment_html(text: str) -> str:
+    text = text.strip()
+    if text.startswith("<"):
+        return text
+    return f"<p>{_esc(text)}</p>"
+
+
+def normalize_task_name(name: str) -> str:
+    m = re.match(r"^(\d+)\.\s*(.+)$", name.strip())
+    if not m:
+        return name
+    return f"{int(m.group(1)):02d}. {m.group(2)}"
+
+
+def _desc(header: str, body: str) -> str:
+    """Convert a plain-text block to Caflou HTML (paragraphs + bullet lists)."""
+    parts = [f"<p><strong>{_esc(header)}</strong></p>"]
+    for block in body.strip().split("\n\n"):
+        block = block.strip()
+        if not block or block.startswith("━━"):
+            continue
+        lines = [ln.strip() for ln in block.split("\n") if ln.strip() and not ln.strip().startswith("━━")]
+        if not lines:
+            continue
+        bullet_prefixes = ("• ", "- ", "⏳ ", "✅ ")
+        if all(any(ln.startswith(p) for p in bullet_prefixes) for ln in lines):
+            items = []
+            for ln in lines:
+                for p in bullet_prefixes:
+                    if ln.startswith(p):
+                        items.append(_esc(ln[len(p) :]))
+                        break
+                else:
+                    items.append(_esc(ln))
+            parts.append("<ul>" + "".join(f"<li>{item}</li>" for item in items) + "</ul>")
+        elif len(lines) == 1:
+            parts.append(f"<p>{_esc(lines[0])}</p>")
+        else:
+            bullets = []
+            prose = []
+            for ln in lines:
+                if ln.startswith("• "):
+                    bullets.append(_esc(ln[2:]))
+                elif ln.startswith("- "):
+                    bullets.append(_esc(ln[2:]))
+                else:
+                    prose.append(_esc(ln))
+            if prose:
+                parts.append(f"<p>{'<br>'.join(prose)}</p>")
+            if bullets:
+                parts.append("<ul>" + "".join(f"<li>{b}</li>" for b in bullets) + "</ul>")
+    return "".join(parts)
+
 
 # --- Project metadata -------------------------------------------------------
 
 PROJECT = {
     "name": "Caflou MCP",
     "description": (
-        "OpenAPI → MCP bridge (mcp-hooker) pro AI agenty nad Caflou ERP/PSA.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "VEŘEJNÝ ENDPOINT\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "• MCP: https://mcp-hooker.catania-service.cz/caflou/mcp\n"
-        "• Auth: OAuth Bearer (Claude Web) NEBO header apikey (Cursor/služby)\n"
-        "• Health (host): http://127.0.0.1:3003/health → tool_count: 212\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "STACK (jbi-sv-00)\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "nginx TLS → Kong :8040 → caflou-app-1:8000 (Docker)\n"
-        "Keycloak: keycloak.catania-service.cz (Claude connector)\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "REPO & DOKUMENTACE\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "• App: git/mcp-hooker (mcp_hooker/server.py, route_filters.py)\n"
-        "• Deploy: infra-files/servers/jbi-sv-00/mcp-hooker/instances/caflou/\n"
-        "• Runbooky: infra-files/docs/mcp-hooker/\n"
-        "• Maintainer: docs/RUNBOOK.md §18\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "STAV K 2026-07-10\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ 477 tools v OpenAPI → patch.yaml → stabilní operationId (List_Tasks, …)\n"
-        "✅ Profile A tools_filter.yaml → 212 business tools (Claude web cap)\n"
-        "✅ Sanitizer paginated_lists + validate_output: false\n"
-        "✅ Claude Web OAuth + dual-auth Kong (apikey + Bearer)\n"
-        "✅ Overlay odstraněn — funkce v Docker image, ne bind-mount\n"
-        "⏳ Hardening: nullable schemas, Search_2, validate_output zpět\n\n"
-        "Caflou project ID: 615010 | Assignee: Karel Matějovský (68570)"
+        "<p>OpenAPI → MCP bridge (mcp-hooker) pro AI agenty nad Caflou ERP/PSA.</p>"
+        "<p><strong>Veřejný endpoint</strong></p>"
+        "<ul>"
+        "<li>MCP: https://mcp-hooker.catania-service.cz/caflou/mcp</li>"
+        "<li>Auth: OAuth Bearer (Claude Web) nebo header <strong>apikey</strong> (Cursor/služby)</li>"
+        "<li>Health (host): http://127.0.0.1:3003/health → tool_count: 212</li>"
+        "</ul>"
+        "<p><strong>Stack (jbi-sv-00)</strong></p>"
+        "<p>nginx TLS → Kong :8040 → caflou-app-1:8000 (Docker)<br>"
+        "Keycloak: keycloak.catania-service.cz (Claude connector)</p>"
+        "<p><strong>Repo &amp; dokumentace</strong></p>"
+        "<ul>"
+        "<li>App: git/mcp-hooker (server.py, route_filters.py)</li>"
+        "<li>Deploy: infra-files/servers/jbi-sv-00/mcp-hooker/instances/caflou/</li>"
+        "<li>Runbooky: infra-files/docs/mcp-hooker/</li>"
+        "<li>Maintainer: docs/RUNBOOK.md §18</li>"
+        "</ul>"
+        "<p><strong>Stav k 2026-07-11</strong></p>"
+        "<ul>"
+        "<li>✅ 477 tools v OpenAPI → patch.yaml → stabilní operationId (List_Tasks, …)</li>"
+        "<li>✅ Profile A tools_filter.yaml → 212 business tools (Claude web cap)</li>"
+        "<li>✅ Sanitizer paginated_lists + validate_output: false</li>"
+        "<li>✅ Claude Web OAuth + dual-auth Kong (apikey + Bearer)</li>"
+        "<li>✅ Overlay odstraněn — funkce v Docker image, ne bind-mount</li>"
+        "<li>✅ MCP server.instructions — HTML rich text pro task/project/todo/comment</li>"
+        "<li>⏳ Hardening: nullable schemas, Search_2, validate_output zpět — viz "
+        f"{_link_task(2165205, '12. Budoucí hardening')}</li>"
+        "</ul>"
+        f"<p>Projekt: {_link_project(615010)} | Assignee: Karel Matějovský (68570)</p>"
     ),
-    "planned_hours": 168,
-    "progress": 93,
+    "planned_hours": 170,
+    "progress": 94,
     "start_date": "2026-06-22",
     "end_date": "2026-09-30",
 }
 
 # --- Tasks ------------------------------------------------------------------
-
-def _desc(header: str, body: str) -> str:
-    return f"{header}\n\n{body.strip()}"
-
 
 TASKS: list[dict] = [
     {
@@ -80,29 +168,33 @@ TASKS: list[dict] = [
         "planned_hours": 4,
         "progress": 95,
         "finished": False,
-        "description": _desc(
-            "EXECUTIVE SUMMARY (pro reporting)",
-            """
+        "description": (
+            _desc(
+                "EXECUTIVE SUMMARY (pro reporting)",
+                """
 Cíl: Exponovat Caflou REST API jako kurátorovanou sadu MCP nástrojů pro AI agenty
 (Claude Web, Cursor, interní automatizace).
 
-Výsledek k 10. 7. 2026:
+Výsledek k 11. 7. 2026:
 • Produkční MCP endpoint funguje end-to-end (OAuth + apikey)
 • 212 business nástrojů (Profile A) — pod limitem Claude Web (~256)
 • Kompletní runbooky v infra-files + maintainer RUNBOOK v repu
 • Ověřeno: List_Accounts, List_Users, Create/Update_Task, správa projektů přes MCP
 
-Odhad práce celkem: ~168 h | Skutečně dokončeno: ~156 h | Zbývá: ~12 h (hardening)
+Odhad práce celkem: ~170 h | Skutečně dokončeno: ~160 h | Zbývá: ~10 h (hardening)
 
 Dokumentace pro management:
 → infra-files/docs/mcp-hooker/jbi-sv-00_caflou-mcp-tooling.md
 → infra-files/docs/mcp-hooker/jbi-sv-00_claude-web-connector-runbook.md
-            """,
+                """,
+            )
+            + f"<p>HTML rich text pro popisy — viz {_link_task(2167020)}.</p>"
+            + f"<p>Související projekt: {_link_project(615009)}.</p>"
         ),
         "subtasks": [],
         "comments": [
+            "2026-07-11: Sync script + všechny task popisy převedeny na HTML.",
             "2026-07-10: Overlay odstraněn, tool_count=212 potvrzeno na /health.",
-            "2026-07-09: Claude Web OAuth connector nasazen (Keycloak + Kong JWT).",
         ],
     },
     {
@@ -170,15 +262,12 @@ Dokončeno: 2026-07-09 | Odhad: 20 h
         "planned_hours": 4,
         "progress": 100,
         "finished": True,
-        "description": _desc(
-            "validate_output: false pro field-level schema drift",
-            """
-Caflou live API vrací nullable pole a extra klíče mimo spec.
-Strict validace blokovala List_Users aj.
-
-Dokončeno: 2026-07-09 | Odhad: 4 h
-TODO: částečně zapnout po nullable sanitizeru (úkol 12)
-            """,
+        "description": (
+            "<p><strong>validate_output: false pro field-level schema drift</strong></p>"
+            "<p>Caflou live API vrací nullable pole a extra klíče mimo spec.<br>"
+            "Strict validace blokovala List_Users aj.</p>"
+            f"<p>Dokončeno: 2026-07-09 | Odhad: 4 h<br>"
+            f"TODO: částečně zapnout po nullable sanitizeru ({_link_task(2165205)})</p>"
         ),
         "subtasks": [],
         "comments": [],
@@ -310,20 +399,20 @@ Dokončeno: 2026-07-10 | Odhad: 16 h
         "planned_hours": 12,
         "progress": 100,
         "finished": True,
-        "description": _desc(
-            "End-to-end agent workflows ověřeny",
-            """
-• List_Accounts → account_id
-• List_Users → Karel 68570
-• List_Tasks / Update_Task (nested task body)
-• Create_Projects / Create_Tasks — tento projekt v Caflou vytvořen přes MCP
-• Projekty Voicebot 615009 + Caflou MCP 615010
-
-Dokončeno: 2026-07-09 | Odhad: 12 h
-            """,
+        "description": (
+            "<p><strong>End-to-end agent workflows ověřeny</strong></p>"
+            "<ul>"
+            "<li>List_Accounts → account_id</li>"
+            "<li>List_Users → Karel 68570</li>"
+            "<li>List_Tasks / Update_Task (nested task body)</li>"
+            f"<li>Create_Projects / Create_Tasks — projekty {_link_project(615009)} + "
+            f"{_link_project(615010)}</li>"
+            f"<li>HTML rich text popisy — ověřeno {_link_task(2167020)}</li>"
+            "</ul>"
+            "<p>Dokončeno: 2026-07-11 | Odhad: 12 h</p>"
         ),
         "subtasks": [],
-        "comments": ["Projekt 615010 synchronizován skriptem caflou_sync_mcp_project.py."],
+        "comments": ["2026-07-11: HTML formatting pro MCP task descriptions ověřeno v produkci."],
     },
     {
         "name": "12. Budoucí hardening",
@@ -399,7 +488,7 @@ Dokončeno: 2026-07-10 | Odhad: 8 h
         "comments": ["Řeší Claude Web ~256 tool cap bez ztráty business CRUD."],
     },
     {
-        "name": "15. Claude Web OAuth connector",
+        "name": "15. Claude Web OAuth + Cursor IDE auth",
         "planned_hours": 24,
         "progress": 100,
         "finished": True,
@@ -442,6 +531,55 @@ Dokončeno: 2026-07-10 | Odhad: 4 h
         ),
         "subtasks": [],
         "comments": ["Po cleanup: /health tool_count=212 bez overlay mountů."],
+    },
+    {
+        "name": "17. MCP instructions — HTML rich text",
+        "planned_hours": 2,
+        "progress": 100,
+        "finished": True,
+        "description": (
+            _desc(
+                "Rich text pro Caflou UI — task / project / todo / comment",
+                """
+Caflou UI ukládá HTML, ne plain text. MCP zápisy s \\n nebo • se v UI zobrazí jako jeden řádek.
+
+Opraveno Jul 2026:
+• server.instructions v instances/caflou/config.yaml
+• Runbook jbi-sv-00_caflou-mcp-tooling.md § Rich text
+• caflou_sync_mcp_project.py generuje HTML pro všechny popisy
+
+Vzor HTML:
+• Odstavec: <p>…</p>
+• Seznam: <ul><li>…</li></ul>
+• Tučně: <strong>…</strong>
+
+Dokončeno: 2026-07-10 | Odhad: 2 h
+                """,
+            )
+            + "<p>Referenční úkoly:</p><ul>"
+            f"<li>{_link_task(2167020)} (tento projekt)</li>"
+            f"<li>{_link_task(2166547)} ({_link_project(615380)})</li>"
+            "</ul>"
+        ),
+        "subtasks": [
+            (
+                "server.instructions v config.yaml",
+                _desc(
+                    "MCP initialize guidance",
+                    "Rich text sekce pro agenty — task/project/todo/comment fields.",
+                ),
+                True,
+            ),
+            (
+                "Runbook + sync script HTML",
+                _desc(
+                    "Dokumentace + automatický sync",
+                    "jbi-sv-00_caflou-mcp-tooling.md + caflou_sync_mcp_project.py _desc().",
+                ),
+                True,
+            ),
+        ],
+        "comments": ["2026-07-10: Ověřeno Update_Task s HTML — UI renderuje odstavce a seznamy."],
     },
 ]
 
@@ -530,11 +668,14 @@ def list_project_tasks(client: McpClient, project_id: int) -> list[dict]:
                 "account_id": ACCOUNT_ID,
                 "page": page,
                 "per": 100,
+                # Optional: Caflou supports filter when exposed in MCP schema (see patch.yaml).
+                # Client-side filter below is the reliable fallback.
                 "filter": {"project_id": project_id},
             },
         )
         if isinstance(result, dict):
             batch = result.get("results", [])
+            batch = [t for t in batch if t.get("project_id") == project_id]
             tasks.extend(batch)
             if not result.get("next_page"):
                 break
@@ -547,7 +688,7 @@ def list_project_tasks(client: McpClient, project_id: int) -> list[dict]:
 def list_subtasks(client: McpClient, task_id: int) -> list[dict]:
     result = client.call(
         "List_Tasks_To_Dos",
-        {"account_id": ACCOUNT_ID, "task_id__path": str(task_id), "page": 1, "per": 100},
+        {"account_id": ACCOUNT_ID, "task_id": str(task_id), "page": 1, "per": 100},
     )
     if isinstance(result, dict):
         return result.get("results", [])
@@ -558,7 +699,14 @@ def update_project(client: McpClient) -> None:
     args = {
         "account_id": ACCOUNT_ID,
         "id": str(PROJECT_ID),
-        **PROJECT,
+        "project": {
+            "name": PROJECT["name"],
+            "description": PROJECT["description"],
+            "planned_hours": PROJECT["planned_hours"],
+            "progress": PROJECT["progress"],
+            "start_date": PROJECT["start_date"],
+            "end_date": PROJECT["end_date"],
+        },
         "user_id": KAREL_USER_ID,
     }
     client.call("Update_Project", args)
@@ -566,7 +714,8 @@ def update_project(client: McpClient) -> None:
 
 
 def upsert_task(client: McpClient, spec: dict, existing_by_name: dict[str, dict]) -> int:
-    name = spec["name"]
+    name = normalize_task_name(spec["name"])
+    spec = {**spec, "name": name}
     base_args = {
         "account_id": ACCOUNT_ID,
         "name": name,
@@ -582,6 +731,7 @@ def upsert_task(client: McpClient, spec: dict, existing_by_name: dict[str, dict]
 
     if name in existing_by_name:
         tid = existing_by_name[name]["id"]
+        is_new = False
         client.call(
             "Update_Task",
             {
@@ -600,51 +750,58 @@ def upsert_task(client: McpClient, spec: dict, existing_by_name: dict[str, dict]
         )
         print(f"    updated task {name[:50]!r} id={tid}")
     else:
+        is_new = True
         result = client.call("Create_Tasks", base_args)
         tid = result["id"] if isinstance(result, dict) else 0
         print(f"    created task {name[:50]!r} id={tid}")
 
     existing_subs = {s["name"]: s for s in list_subtasks(client, tid)}
     for sub_name, sub_desc, sub_done in spec.get("subtasks", []):
+        if not isinstance(sub_desc, str):
+            sub_desc = str(sub_desc)
+        if not sub_desc.strip().startswith("<"):
+            sub_desc = _plain_p(sub_desc.strip())
         if sub_name in existing_subs:
             sid = existing_subs[sub_name]["id"]
             client.call(
-                "Update_Tasks_To_Do",
+                "Update_ToDo",
                 {
                     "account_id": ACCOUNT_ID,
-                    "task_id__path": str(tid),
                     "id": str(sid),
-                    "name": sub_name,
-                    "description": sub_desc,
-                    "finished": sub_done,
+                    "to_do": {
+                        "name": sub_name,
+                        "description": sub_desc,
+                        "finished": sub_done,
+                    },
                 },
             )
         else:
-            client.call(
-                "Create_Tasks_To_Dos",
-                {
-                    "account_id": ACCOUNT_ID,
-                    "task_id__path": str(tid),
-                    "name": sub_name,
+                client.call(
+                    "Create_Tasks_To_Dos",
+                    {
+                        "account_id": ACCOUNT_ID,
+                        "task_id": str(tid),
+                        "name": sub_name,
                     "description": sub_desc,
                     "finished": sub_done,
                     "user_id": KAREL_USER_ID,
                 },
             )
 
-    for comment_text in spec.get("comments", []):
-        try:
-            client.call(
-                "Create_Comments",
-                {
-                    "account_id": ACCOUNT_ID,
-                    "commentable_type": "Task",
-                    "commentable_id": tid,
-                    "text": comment_text,
-                },
-            )
-        except RuntimeError as exc:
-            print(f"      comment skip: {exc}")
+    if is_new or SYNC_COMMENTS:
+        for comment_text in spec.get("comments", []):
+            try:
+                client.call(
+                    "Create_Comments",
+                    {
+                        "account_id": ACCOUNT_ID,
+                        "commented_type": "Task",
+                        "commented_id": tid,
+                        "text": _comment_html(comment_text),
+                    },
+                )
+            except RuntimeError as exc:
+                print(f"      comment skip: {exc}")
 
     return int(tid)
 
@@ -666,15 +823,15 @@ def main() -> int:
     print(f"\nSyncing project {PROJECT_ID}...")
     update_project(client)
 
-    existing = {t["name"]: t for t in list_project_tasks(client, PROJECT_ID)}
+    existing = {normalize_task_name(t["name"]): t for t in list_project_tasks(client, PROJECT_ID)}
     print(f"  existing tasks: {len(existing)}")
 
     for spec in TASKS:
         upsert_task(client, spec, existing)
 
     final = list_project_tasks(client, PROJECT_ID)
-    expected = {t["name"] for t in TASKS}
-    found = {t["name"] for t in final}
+    expected = {normalize_task_name(t["name"]) for t in TASKS}
+    found = {normalize_task_name(t["name"]) for t in final}
     missing = expected - found
     done = sum(1 for t in final if t.get("finished"))
     print(f"\n=== DONE ===")

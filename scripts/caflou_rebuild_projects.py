@@ -28,12 +28,18 @@ VOICEBOT_TASKS = [
             "Cíl: Interní voicebot pro CATANIA GROUP — příchozí hovory na +420 371 585 438 "
             "směrovat na ElevenLabs Conversational AI agenta.\n\n"
             "Stack: jbi-sv-00 | Asterisk 21 | OpenSIPS 3.4 | O2 voipmenu.cz | ElevenLabs\n\n"
-            "Dokumentace: infra-files/docs/telephony/jbi-sv-00_o2_elevenlabs_asterisk.md\n\n"
-            "Stav k 2026-06-26:\n"
+            "Dokumentace:\n"
+            "→ infra-files/docs/telephony/jbi-sv-00_o2_elevenlabs_asterisk.md\n"
+            "→ infra-files/docs/telephony/voicebot-caflou-integration.md\n"
+            "→ elevenlabs/docs/voicebot-architecture.md\n"
+            "→ voicebot-core/docs/ARCHITECTURE.md\n\n"
+            "Stav k 2026-07-11:\n"
             "✅ O2 registrace, příchozí hovory, AI konverzace, audio obousměrně\n"
             "✅ OpenSIPS tel:→sip: REFER rewrite, Asterisk 202 Accepted\n"
-            "❌ Dokončení přenosu na operátora — O2 vrací 403\n\n"
-            "Otevřené: kontaktovat O2 — povolit SIP REFER a/nebo druhý kanál"
+            "✅ Test agent workflow script (update_test_agent.py)\n"
+            "✅ CRM callback architektura zdokumentována\n"
+            "✅ Přenos na operátora — O2 403 vyřešeno (2026-07)\n"
+            "⏳ voicebot-core /log-callback — neimplementováno"
         ),
         "progress": 85,
         "finished": False,
@@ -118,13 +124,17 @@ VOICEBOT_TASKS = [
         ],
     },
     {
-        "name": "9. Přenos hovoru na operátora — blokováno O2",
-        "description": "REFER rewrite OK, O2 vrací 403 na transfer i druhý outbound INVITE.",
-        "progress": 40,
-        "finished": False,
+        "name": "9. Přenos hovoru na operátora",
+        "description": (
+            "SIP REFER přepojení na operátora/mobil — funguje (2026-07).\n\n"
+            "Dříve: O2 vracelo 403 na REFER i concurrent Dial (2026-06). Vyřešeno provisioningem u O2.\n\n"
+            "Runbook: infra-files/docs/telephony/jbi-sv-00_o2_elevenlabs_asterisk.md"
+        ),
+        "progress": 100,
+        "finished": True,
         "subtasks": [
-            ("Požadavek na O2 support", "Povolit SIP REFER / blind transfer na trunku.", False),
-            ("Ověřeno: Dial() nefunguje concurrent", "Druhý outbound INVITE během hovoru → 403.", True),
+            ("O2 403 na REFER — vyřešeno", "Transfer na cílové číslo funguje (2026-07).", True),
+            ("OpenSIPS tel:→sip: rewrite", "Refer-To rewrite před Asteriskem.", True),
         ],
     },
     {
@@ -133,6 +143,60 @@ VOICEBOT_TASKS = [
         "progress": 25,
         "finished": False,
         "subtasks": [],
+    },
+    {
+        "name": "11. ElevenLabs Test agent — workflow a end_call",
+        "description": (
+            "Script elevenlabs/scripts/update_test_agent.py — česká testovací linka, "
+            "workflow nodes (přivítání → menu → tech test → rozloučení), povinný end_call pro SIP hangup.\n\n"
+            "Agent Test: agent_2301k95k4p2je9sscxsh5gjpbmdb\n\n"
+            "Dokumentace: elevenlabs/docs/voicebot-architecture.md"
+        ),
+        "progress": 90,
+        "finished": False,
+        "subtasks": [
+            ("update_test_agent.py nasazen na produkci", "Ověřit first_message a workflow vs live agent.", False),
+            ("Asterisk rtp_timeout pro end_call", "elevenlabs/asterisk/pjsip-elevenlabs.conf.example", True),
+        ],
+    },
+    {
+        "name": "12. CRM callback — architektura (Caflou logging)",
+        "description": (
+            "Cíl: při dotazu na produkt/službu zalogovat zájem + telefon volajícího do Caflou.\n\n"
+            "Rozhodnutí 2026-07-11:\n"
+            "• ElevenLabs podporuje MCP, ale voice agent volá jednu kurátorovanou akci (webhook / thin MCP)\n"
+            "• NE plný Caflou MCP (~212 tools) — latence, bezpečnost, prompt bloat\n"
+            "• Telefon volajícího: system__caller_id (ElevenLabs dynamic variable)\n"
+            "• mcp-hooker patch neumí composite logiku — jen OpenAPI proxy na Caflou\n"
+            "• Interest capture workflow node — krátký prompt, ne Caflou API docs\n\n"
+            "Dokumentace:\n"
+            "→ infra-files/docs/telephony/voicebot-caflou-integration.md\n"
+            "→ elevenlabs/docs/voicebot-architecture.md\n"
+            "→ mcp-hooker/docs/voicebot-caflou-mcp.md"
+        ),
+        "progress": 25,
+        "finished": False,
+        "subtasks": [
+            ("Architektura zdokumentována", "2026-07-11 — MCP vs webhook vs filtered caflou-voice", True),
+            ("ElevenLabs webhook / thin MCP na agentovi", "log_callback_request tool", False),
+            ("Volitelně caflou-voice MCP instance", "4 allowlisted tools pro prototyp", False),
+        ],
+    },
+    {
+        "name": "13. voicebot-core — log-callback API",
+        "description": (
+            "FastAPI middleware: POST /log-callback → Caflou (List_Contacts, Create_Contact, "
+            "Create_Tasks na projekt 615009, Create_Comments s HTML).\n\n"
+            "Repo: voicebot-core (zatím stub /health only).\n\n"
+            "Dokumentace: voicebot-core/docs/ARCHITECTURE.md"
+        ),
+        "progress": 5,
+        "finished": False,
+        "subtasks": [
+            ("Caflou client + HTML builders", "Vzor: caflou_sync_mcp_project.py", False),
+            ("POST /log-callback endpoint", "topic, notes, caller_name + system caller_phone", False),
+            ("Deploy jbi-sv-00 + Kong route", "TBD URL", False),
+        ],
     },
 ]
 
@@ -377,7 +441,7 @@ def create_task(
             "Create_17",
             {
                 "account_id": ACCOUNT_ID,
-                "task_id__path": str(tid),
+                "task_id": str(tid),
                 "name": sub_name,
                 "description": sub_desc,
                 "finished": sub_done,

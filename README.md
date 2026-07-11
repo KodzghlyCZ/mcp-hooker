@@ -231,6 +231,8 @@ ruff check mcp_hooker
 
 See [docs/RUNBOOK.md](docs/RUNBOOK.md) for architecture, deployment notes, and troubleshooting.
 
+**Voicebot ↔ Caflou (ElevenLabs):** [docs/voicebot-caflou-mcp.md](docs/voicebot-caflou-mcp.md) — patch limits, filtered `caflou-voice` instance, thin MCP via voicebot-core. Sync Caflou project 615009: `scripts/caflou_sync_voicebot_project.py`.
+
 ## License
 
 MIT
