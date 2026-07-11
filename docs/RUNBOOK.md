@@ -1320,6 +1320,11 @@ Expect HTTP `200` and a session ID in logs.
 | 2026-07-09 | `sanitizer.on_unresolved: replace_generic` for Cursor | Unresolved `#/$defs/TaskTodo` in `List_TaskTodos` broke Cursor tool discovery |
 | 2026-07-09 | Instance config dir mount in Docker | `config.yaml` alone is insufficient when `patch_files` is set |
 | 2026-07-09 | Startup warning on doubled base path | Catch `api.base_url` footgun before tool calls fail |
+| 2026-07-10 | Generic `openapi.tools_filter` (`route_filters.py`) | Per-instance YAML rules; no upstream hardcoding; FastMCP `route_map_fn` |
+| 2026-07-10 | Caflou Profile A `tools_filter.yaml` | **477 → 212** tools for Claude Web cap; exclude UI/email/chat/bank chrome |
+| 2026-07-10 | Remove infra overlay bind-mounts | Overlay overrode image `server.py`; filter config alone was insufficient until image + compose sync |
+| 2026-07-10 | `/health` `tool_count` as deploy gate | `curl 127.0.0.1:3003/health` must show 212 after Profile A deploy |
+| 2026-07-10 | `scripts/caflou_sync_mcp_project.py` | Sync Caflou project `615010` tasks/progress from runbook knowledge |
 
 ---
 
@@ -1333,6 +1338,7 @@ Consolidated knowledge from building and debugging **mcp-hooker-caflou** (2026-0
 - [Caflou MCP tool names (`List_21`, `Create_13`, …)](#caflou-mcp-tool-names-opaque-operationids)
 - [Search limitations & client-side filtering](#caflou-search-limitations)
 - [Verified agent workflows (users, tasks, projects)](#agent-workflow-recipes-verified-2026-07-09)
+- [Profile A tools filter & overlay removal (2026-07-10)](#profile-a-tools-filter--overlay-removal-2026-07-10)
 
 ### Three auth layers (do not mix them up)
 
@@ -1745,7 +1751,28 @@ The upstream Caflou OpenAPI spec assigns auto-generated `operationId` values (`L
 2. Paginate with `page` and `per` (up to 1000; mind rate limits).
 3. Filter matches **client-side** in the agent (name, description, custom fields).
 
-Example: finding chatbot/voicebot projects — paginate `List_14`, filter `name` / `description` for `chatbot`, `voicebot`, `voice bot`, etc. No ElevenLabs references were found in a full scan (102 projects, 81 companies, 30 tasks) using this approach (2026-07-09).
+Example: finding chatbot/voicebot projects — paginate `List_Projects`, filter `name` / `description` for `chatbot`, `voicebot`, `voice bot`, etc.
+
+### Profile A tools filter & overlay removal (2026-07-10)
+
+**Problem:** Claude Web indexes ~256 MCP tools. Caflou's patched spec still exposes **477** operations (business + UI chrome). Agents could not reliably find `List_Accounts` and similar tools buried late in the list.
+
+**Solution:**
+
+1. Generic engine: `mcp_hooker/route_filters.py` — reads `openapi.tools_filter` from config.
+2. Instance rules: `instances/caflou/tools_filter.yaml` — Profile A trims to **212** business tools.
+3. Verify: `GET /health` → `"tool_count": 212` on `127.0.0.1:3003`.
+
+**Overlay incident:** Config had `tools_filter.enabled: true` but production still served 477 because `infra-files/overlay/mcp_hooker/server.py` bind-mounted over the Docker image and did not wire `route_filters`. **Fix:** remove overlay volumes; `docker compose pull && up -d --force-recreate`.
+
+**Caflou project tracking:** project `615010` (*Caflou MCP*) — sync tasks/descriptions from runbooks:
+
+```bash
+export MCP_CAFOU_APIKEY='<kong-key>'   # or MCP_CAFOU_BEARER='<jwt>'
+python3 scripts/caflou_sync_mcp_project.py
+```
+
+See also: `infra-files/docs/mcp-hooker/jbi-sv-00_caflou-mcp-tooling.md`.
 
 ### Agent workflow recipes (verified 2026-07-09)
 
